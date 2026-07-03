@@ -1,5 +1,3 @@
-from typing import TextIO, Union
-
 import canopen.network
 from canopen.objectdictionary import ObjectDictionary, import_od
 
@@ -17,7 +15,7 @@ class BaseNode:
     def __init__(
         self,
         node_id: int,
-        object_dictionary: Union[ObjectDictionary, str, TextIO],
+        object_dictionary: ObjectDictionary | str | object,
     ):
         self.network: canopen.network.Network = canopen.network._UNINITIALIZED_NETWORK
 

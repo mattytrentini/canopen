@@ -2,25 +2,34 @@
 Object Dictionary module
 """
 
-from __future__ import annotations
-
-import logging
 import struct
-from collections.abc import Collection, Iterator, Mapping, MutableMapping
-from typing import Optional, TextIO, Union
+
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except ImportError:
+    class _Logger:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): pass
+        def error(self, *a, **k): pass
+    logger = _Logger()
+
+try:
+    from collections.abc import Mapping, MutableMapping
+except ImportError:
+    Mapping = object
+    MutableMapping = object
 
 from canopen.objectdictionary.datatypes import *
 from canopen.objectdictionary.datatypes import IntegerN, UnsignedN
 from canopen.utils import pretty_index
 
 
-logger = logging.getLogger(__name__)
-
-
 def export_od(
-    od: ObjectDictionary,
-    dest: Union[str, TextIO, None] = None,
-    doc_type: Optional[str] = None
+    od: "ObjectDictionary",
+    dest: str | object | None = None,
+    doc_type: str | None = None
 ) -> None:
     """Export an object dictionary.
 
@@ -73,9 +82,9 @@ def export_od(
 
 
 def import_od(
-    source: Union[str, TextIO, None],
-    node_id: Optional[int] = None,
-) -> ObjectDictionary:
+    source: str | object | None,
+    node_id: int | None = None,
+) -> "ObjectDictionary":
     """Parse an EDS, DCF, or EPF file.
 
     :param source:
@@ -130,8 +139,8 @@ class ObjectDictionary(MutableMapping):
         self.device_information = DeviceInformation()
 
     def __getitem__(
-        self, index: Union[int, str]
-    ) -> Union[ODArray, ODRecord, ODVariable]:
+        self, index: int | str
+    ) -> "ODArray | ODRecord | ODVariable":
         """Get object from object dictionary by name or index."""
         item = self.names.get(index)
         if item is None:
@@ -144,17 +153,17 @@ class ObjectDictionary(MutableMapping):
         return item
 
     def __setitem__(
-        self, index: Union[int, str], obj: Union[ODArray, ODRecord, ODVariable]
+        self, index: int | str, obj: "ODArray | ODRecord | ODVariable"
     ):
         assert index == obj.index or index == obj.name
         self.add_object(obj)
 
-    def __delitem__(self, index: Union[int, str]):
+    def __delitem__(self, index: int | str):
         obj = self[index]
         del self.indices[obj.index]
         del self.names[obj.name]
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self):
         return iter(sorted(self.indices))
 
     def __len__(self) -> int:
@@ -163,7 +172,7 @@ class ObjectDictionary(MutableMapping):
     def __contains__(self, index: object) -> bool:
         return index in self.names or index in self.indices
 
-    def add_object(self, obj: Union[ODArray, ODRecord, ODVariable]) -> None:
+    def add_object(self, obj: "ODArray | ODRecord | ODVariable") -> None:
         """Add object to the object dictionary.
 
         :param obj:
@@ -177,8 +186,8 @@ class ObjectDictionary(MutableMapping):
         self.names[obj.name] = obj
 
     def get_variable(
-        self, index: Union[int, str], subindex: int = 0
-    ) -> Optional[ODVariable]:
+        self, index: int | str, subindex: int = 0
+    ) -> "ODVariable | None":
         """Get the variable object at specified index (and subindex if applicable).
 
         :return: ODVariable if found, else `None`
@@ -214,17 +223,17 @@ class ODRecord(MutableMapping):
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} {self.name!r} at {pretty_index(self.index)}>"
 
-    def __getitem__(self, subindex: Union[int, str]) -> ODVariable:
+    def __getitem__(self, subindex: int | str) -> "ODVariable":
         item = self.names.get(subindex) or self.subindices.get(subindex)
         if item is None:
             raise KeyError(f"Subindex {pretty_index(None, subindex)} was not found")
         return item
 
-    def __setitem__(self, subindex: Union[int, str], var: ODVariable):
+    def __setitem__(self, subindex: int | str, var: "ODVariable"):
         assert subindex == var.subindex
         self.add_member(var)
 
-    def __delitem__(self, subindex: Union[int, str]):
+    def __delitem__(self, subindex: int | str):
         var = self[subindex]
         del self.subindices[var.subindex]
         del self.names[var.name]
@@ -232,7 +241,7 @@ class ODRecord(MutableMapping):
     def __len__(self) -> int:
         return len(self.subindices)
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self):
         return iter(sorted(self.subindices))
 
     def __contains__(self, subindex: object) -> bool:
@@ -243,7 +252,7 @@ class ODRecord(MutableMapping):
             return NotImplemented
         return self.index == other.index
 
-    def add_member(self, variable: ODVariable) -> None:
+    def add_member(self, variable: "ODVariable") -> None:
         """Adds a :class:`~canopen.objectdictionary.ODVariable` to the record."""
         variable.parent = self
         self.subindices[variable.subindex] = variable
@@ -275,7 +284,7 @@ class ODArray(Mapping):
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} {self.name!r} at {pretty_index(self.index)}>"
 
-    def __getitem__(self, subindex: Union[int, str]) -> ODVariable:
+    def __getitem__(self, subindex: int | str) -> "ODVariable":
         var = self.names.get(subindex) or self.subindices.get(subindex)
         if var is not None:
             # This subindex is defined
@@ -298,7 +307,7 @@ class ODArray(Mapping):
     def __len__(self) -> int:
         return len(self.subindices)
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self):
         return iter(sorted(self.subindices))
 
     def __eq__(self, other: object) -> bool:
@@ -306,7 +315,7 @@ class ODArray(Mapping):
             return NotImplemented
         return self.index == other.index
 
-    def add_member(self, variable: ODVariable) -> None:
+    def add_member(self, variable: "ODVariable") -> None:
         """Adds a :class:`~canopen.objectdictionary.ODVariable` to the record."""
         variable.parent = self
         self.subindices[variable.subindex] = variable
@@ -436,7 +445,7 @@ class ODVariable:
         # Only for types which we parse using a structure.
         return self.data_type in self.STRUCT_TYPES
 
-    def decode_raw(self, data: bytes) -> Union[int, float, str, bytes, bytearray]:
+    def decode_raw(self, data: bytes) -> int | float | str | bytes | bytearray:
         if self.data_type == VISIBLE_STRING:
             # Strip any trailing NUL characters from C-based systems
             return data.decode("ascii", errors="ignore").rstrip("\x00")
@@ -456,7 +465,7 @@ class ODVariable:
             # Just return the data as is
             return data
 
-    def encode_raw(self, value: Union[int, float, str, bytes, bytearray]) -> bytes:
+    def encode_raw(self, value: int | float | str | bytes | bytearray) -> bytes:
         if isinstance(value, (bytes, bytearray)):
             return value
         elif self.data_type == VISIBLE_STRING:
@@ -486,12 +495,12 @@ class ODVariable:
             raise TypeError(
                 f"Do not know how to encode {value!r} to data type 0x{self.data_type:X}")
 
-    def decode_phys(self, value: int) -> Union[int, bool, float, str, bytes]:
+    def decode_phys(self, value: int) -> int | bool | float | str | bytes:
         if self.data_type in INTEGER_TYPES:
             value *= self.factor
         return value
 
-    def encode_phys(self, value: Union[int, bool, float, str, bytes]) -> int:
+    def encode_phys(self, value: int | bool | float | str | bytes) -> int:
         if self.data_type in INTEGER_TYPES:
             if self.factor != 1:
                 value = round(value / self.factor)
@@ -516,7 +525,7 @@ class ODVariable:
         raise ValueError(
             f"No value corresponds to '{desc}'. Valid values are: {valid_values}")
 
-    def decode_bits(self, value: int, bits: Union[str, Collection[int]]) -> int:
+    def decode_bits(self, value: int, bits: str | list[int]) -> int:
         """Isolate and right-shift the specified bits from a given integer.
 
         :param value: Variable value holding the bits
@@ -532,7 +541,7 @@ class ODVariable:
         return (value & mask) >> min(bits)
 
     def encode_bits(
-        self, original_value: int, bits: Union[str, Collection[int]], bit_value: int
+        self, original_value: int, bits: str | list[int], bit_value: int
     ) -> int:
         """Replace the specified bits with the given (unshifted) pattern.
 

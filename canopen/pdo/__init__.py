@@ -1,6 +1,14 @@
 import itertools
-import logging
-from collections.abc import Iterator
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except ImportError:
+    class _Logger:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): pass
+        def error(self, *a, **k): pass
+    logger = _Logger()
 
 from canopen import node
 from canopen.pdo.base import PdoBase, PdoMap, PdoMaps, PdoVariable
@@ -15,8 +23,6 @@ __all__ = [
     "RPDO",
     "TPDO",
 ]
-
-logger = logging.getLogger(__name__)
 
 
 class PDO(PdoBase):
@@ -42,7 +48,7 @@ class PDO(PdoBase):
             self.map.maps[self.tx.map_offset + (key - 1)] = value
             self.map.maps[self.tx.com_offset + (key - 1)] = value
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self):
         return itertools.chain(
             (self.rx.map_offset + i - 1 for i in self.rx),
             (self.tx.map_offset + i - 1 for i in self.tx),

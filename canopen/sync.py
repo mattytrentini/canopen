@@ -1,23 +1,15 @@
-from __future__ import annotations
-
-from typing import Optional, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import canopen.network
-
-
 class SyncProducer:
     """Transmits a SYNC message periodically."""
 
     #: COB-ID of the SYNC message
     cob_id = 0x80
 
-    def __init__(self, network: canopen.network.Network):
+    def __init__(self, network: object):
         self.network = network
-        self.period: Optional[float] = None
-        self._task: Optional[canopen.network.PeriodicMessageTask] = None
+        self.period: float | None = None
+        self._task: object | None = None
 
-    def transmit(self, count: Optional[int] = None):
+    def transmit(self, count: int | None = None):
         """Send out a SYNC message once.
 
         :param count:
@@ -28,7 +20,7 @@ class SyncProducer:
         data = bytes([count]) if count is not None else b""
         self.network.send_message(self.cob_id, data)
 
-    def start(self, period: Optional[float] = None):
+    def start(self, period: float | None = None):
         """Start periodic transmission of SYNC message in a background thread.
 
         :param period:

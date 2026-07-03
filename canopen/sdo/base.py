@@ -1,8 +1,9 @@
-from __future__ import annotations
-
 import binascii
-from collections.abc import Iterator, Mapping
-from typing import Optional, Union
+
+try:
+    from collections.abc import Mapping
+except ImportError:
+    Mapping = object
 
 import canopen.network
 from canopen import objectdictionary
@@ -47,9 +48,7 @@ class SdoBase(Mapping):
         self.network: canopen.network.Network = canopen.network._UNINITIALIZED_NETWORK
         self.od = od
 
-    def __getitem__(
-        self, index: Union[str, int]
-    ) -> Union[SdoVariable, SdoArray, SdoRecord]:
+    def __getitem__(self, index: str | int) -> "SdoVariable | SdoArray | SdoRecord":
         entry = self.od[index]
         if isinstance(entry, objectdictionary.ODVariable):
             return SdoVariable(self, entry)
@@ -58,7 +57,7 @@ class SdoBase(Mapping):
         elif isinstance(entry, objectdictionary.ODRecord):
             return SdoRecord(self, entry)
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self):
         return iter(self.od)
 
     def __len__(self) -> int:
@@ -68,8 +67,8 @@ class SdoBase(Mapping):
         return key in self.od
 
     def get_variable(
-        self, index: Union[int, str], subindex: int = 0
-    ) -> Optional[SdoVariable]:
+        self, index: int | str, subindex: int = 0
+    ) -> "SdoVariable | None":
         """Get the variable object at specified index (and subindex if applicable).
 
         :return: SdoVariable if found, else `None`
@@ -81,10 +80,10 @@ class SdoBase(Mapping):
             return obj.get(subindex)
         return None
 
-    def upload(self, index: int, subindex: int) -> bytes:
+    async def upload(self, index: int, subindex: int) -> bytes:
         raise NotImplementedError()
 
-    def download(
+    async def download(
         self,
         index: int,
         subindex: int,
@@ -103,10 +102,10 @@ class SdoRecord(Mapping):
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} {self.od.name!r} at {pretty_index(self.od.index)}>"
 
-    def __getitem__(self, subindex: Union[int, str]) -> SdoVariable:
+    def __getitem__(self, subindex: int | str) -> "SdoVariable":
         return SdoVariable(self.sdo_node, self.od[subindex])
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self):
         # Skip the "highest subindex" entry, which is not part of the data
         return filter(None, iter(self.od))
 
@@ -127,10 +126,10 @@ class SdoArray(Mapping):
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} {self.od.name!r} at {pretty_index(self.od.index)}>"
 
-    def __getitem__(self, subindex: Union[int, str]) -> SdoVariable:
+    def __getitem__(self, subindex: int | str) -> "SdoVariable":
         return SdoVariable(self.sdo_node, self.od[subindex])
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self):
         # Skip the "highest subindex" entry, which is not part of the data
         return iter(range(1, len(self) + 1))
 
@@ -150,23 +149,17 @@ class SdoVariable(variable.Variable):
         self.sdo_node = sdo_node
         variable.Variable.__init__(self, od)
 
-    def get_data(self) -> bytes:
-        data = self.sdo_node.upload(self.od.index, self.od.subindex)
-        response_size = len(data)
-
-        # If size is available through variable in OD, then use the smaller of the two sizes.
-        # Some devices send U32/I32 even if variable is smaller in OD
+    async def get_data(self) -> bytes:
+        data = await self.sdo_node.upload(self.od.index, self.od.subindex)
         if self.od.fixed_size:
-            # Get the size in bytes for this variable
             var_size = len(self.od) // 8
-            if response_size is None or var_size < response_size:
-                # Truncate the data to specified size
+            if var_size < len(data):
                 data = data[:var_size]
         return data
 
-    def set_data(self, data: bytes):
+    async def set_data(self, data: bytes):
         force_segment = self.od.data_type == objectdictionary.DOMAIN
-        self.sdo_node.download(self.od.index, self.od.subindex, data, force_segment)
+        await self.sdo_node.download(self.od.index, self.od.subindex, data, force_segment)
 
     @property
     def writable(self) -> bool:
@@ -175,40 +168,6 @@ class SdoVariable(variable.Variable):
     @property
     def readable(self) -> bool:
         return self.od.readable
-
-    def open(self, mode="rb", encoding="ascii", buffering=1024, size=None,
-             block_transfer=False, request_crc_support=True):
-        """Open the data stream as a file like object.
-
-        :param str mode:
-            ========= ==========================================================
-            Character Meaning
-            --------- ----------------------------------------------------------
-            'r'       open for reading (default)
-            'w'       open for writing
-            'b'       binary mode (default)
-            't'       text mode
-            ========= ==========================================================
-        :param str encoding:
-            The str name of the encoding used to decode or encode the file.
-            This will only be used in text mode.
-        :param int buffering:
-            An optional integer used to set the buffering policy. Pass 0 to
-            switch buffering off (only allowed in binary mode), 1 to select line
-            buffering (only usable in text mode), and an integer > 1 to indicate
-            the size in bytes of a fixed-size chunk buffer.
-        :param int size:
-            Size of data to that will be transmitted.
-        :param bool block_transfer:
-            If block transfer should be used.
-        :param bool request_crc_support:
-            If crc calculation should be requested when using block transfer
-
-        :returns:
-            A file like object.
-        """
-        return self.sdo_node.open(self.od.index, self.od.subindex, mode,
-                                  encoding, buffering, size, block_transfer, request_crc_support=request_crc_support)
 
 
 # For compatibility

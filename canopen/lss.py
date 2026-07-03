@@ -1,12 +1,19 @@
-import logging
-import queue
+import asyncio
 import struct
 import time
 
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except ImportError:
+    class _Logger:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): pass
+        def error(self, *a, **k): pass
+    logger = _Logger()
+
 import canopen.network
-
-
-logger = logging.getLogger(__name__)
 
 # Command Specifier (CS)
 CS_SWITCH_STATE_GLOBAL = 0x04
@@ -85,9 +92,9 @@ class LssMaster:
         self.network: canopen.network.Network = canopen.network._UNINITIALIZED_NETWORK
         self._node_id = 0
         self._data = None
-        self.responses: queue.Queue[bytes] = queue.Queue()
+        self.responses = asyncio.Queue()
 
-    def send_switch_state_global(self, mode):
+    async def send_switch_state_global(self, mode):
         """switch mode to CONFIGURATION_STATE or WAITING_STATE
         in the all slaves on CAN bus.
         There is no reply for this request
@@ -101,13 +108,13 @@ class LssMaster:
 
         message[0] = CS_SWITCH_STATE_GLOBAL
         message[1] = mode
-        self.__send_command(message)
+        await self.__send_command(message)
 
-    def send_switch_mode_global(self, mode):
+    async def send_switch_mode_global(self, mode):
         """obsolete"""
-        self.send_switch_state_global(mode)
+        await self.send_switch_state_global(mode)
 
-    def send_switch_state_selective(self,
+    async def send_switch_state_selective(self,
                                     vendorId, productCode, revisionNumber, serialNumber):
         """switch mode from WAITING_STATE to CONFIGURATION_STATE
         only if 128bits LSS address matches with the arguments.
@@ -130,10 +137,10 @@ class LssMaster:
         :rtype: bool
         """
 
-        self.__send_lss_address(CS_SWITCH_STATE_SELECTIVE_VENDOR_ID, vendorId)
-        self.__send_lss_address(CS_SWITCH_STATE_SELECTIVE_PRODUCT_CODE, productCode)
-        self.__send_lss_address(CS_SWITCH_STATE_SELECTIVE_REVISION_NUMBER, revisionNumber)
-        response = self.__send_lss_address(CS_SWITCH_STATE_SELECTIVE_SERIAL_NUMBER, serialNumber)
+        await self.__send_lss_address(CS_SWITCH_STATE_SELECTIVE_VENDOR_ID, vendorId)
+        await self.__send_lss_address(CS_SWITCH_STATE_SELECTIVE_PRODUCT_CODE, productCode)
+        await self.__send_lss_address(CS_SWITCH_STATE_SELECTIVE_REVISION_NUMBER, revisionNumber)
+        response = await self.__send_lss_address(CS_SWITCH_STATE_SELECTIVE_SERIAL_NUMBER, serialNumber)
 
         cs = struct.unpack_from("<B", response)[0]
         if cs == CS_SWITCH_STATE_SELECTIVE_RESPONSE:
@@ -141,7 +148,7 @@ class LssMaster:
 
         return False
 
-    def inquire_node_id(self):
+    async def inquire_node_id(self):
         """Read the node id.
         CANopen node id must be within the range from 1 to 127.
 
@@ -149,9 +156,9 @@ class LssMaster:
             node id. 0 means it is not read by LSS protocol
         :rtype: int
         """
-        return self.__send_inquire_node_id()
+        return await self.__send_inquire_node_id()
 
-    def inquire_lss_address(self, req_cs):
+    async def inquire_lss_address(self, req_cs):
         """Read the part of LSS address.
             VENDOR_ID, PRODUCT_CODE, REVISION_NUMBER, or SERIAL_NUMBER
 
@@ -162,17 +169,17 @@ class LssMaster:
             part of LSS address
         :rtype: int
         """
-        return self.__send_inquire_lss_address(req_cs)
+        return await self.__send_inquire_lss_address(req_cs)
 
-    def configure_node_id(self, new_node_id):
+    async def configure_node_id(self, new_node_id):
         """Set the node id
 
         :param int new_node_id:
             new node id to set
         """
-        self.__send_configure(CS_CONFIGURE_NODE_ID, new_node_id)
+        await self.__send_configure(CS_CONFIGURE_NODE_ID, new_node_id)
 
-    def configure_bit_timing(self, new_bit_timing):
+    async def configure_bit_timing(self, new_bit_timing):
         """Set the bit timing.
 
         :param int new_bit_timing:
@@ -183,9 +190,9 @@ class LssMaster:
             6: 50 kBit/sec, 7: 20 kBit/sec,
             8: 10 kBit/sec
         """
-        self.__send_configure(CS_CONFIGURE_BIT_TIMING, 0, new_bit_timing)
+        await self.__send_configure(CS_CONFIGURE_BIT_TIMING, 0, new_bit_timing)
 
-    def activate_bit_timing(self, switch_delay_ms):
+    async def activate_bit_timing(self, switch_delay_ms):
         """Activate the bit timing.
 
         :param uint16_t switch_delay_ms:
@@ -198,14 +205,14 @@ class LssMaster:
 
         message[0] = CS_ACTIVATE_BIT_TIMING
         message[1:3] = struct.pack('<H', switch_delay_ms)
-        self.__send_command(message)
+        await self.__send_command(message)
 
-    def store_configuration(self):
+    async def store_configuration(self):
         """Store node id and baud rate.
         """
-        self.__send_configure(CS_STORE_CONFIGURATION)
+        await self.__send_configure(CS_STORE_CONFIGURATION)
 
-    def send_identify_remote_slave(self,
+    async def send_identify_remote_slave(self,
                                    vendorId, productCode,
                                    revisionNumberLow, revisionNumberHigh,
                                    serialNumberLow, serialNumberHigh):
@@ -228,20 +235,20 @@ class LssMaster:
 
         # TODO it should handle the multiple respones from slaves
 
-        self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_VENDOR_ID, vendorId)
-        self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_PRODUCT_CODE, productCode)
-        self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_REVISION_NUMBER_LOW, revisionNumberLow)
-        self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_REVISION_NUMBER_HIGH, revisionNumberHigh)
-        self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_SERIAL_NUMBER_LOW, serialNumberLow)
-        self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_SERIAL_NUMBER_HIGH, serialNumberHigh)
+        await self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_VENDOR_ID, vendorId)
+        await self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_PRODUCT_CODE, productCode)
+        await self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_REVISION_NUMBER_LOW, revisionNumberLow)
+        await self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_REVISION_NUMBER_HIGH, revisionNumberHigh)
+        await self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_SERIAL_NUMBER_LOW, serialNumberLow)
+        await self.__send_lss_address(CS_IDENTIFY_REMOTE_SLAVE_SERIAL_NUMBER_HIGH, serialNumberHigh)
 
-    def send_identify_non_configured_remote_slave(self):
+    async def send_identify_non_configured_remote_slave(self):
         # TODO it should handle the multiple respones from slaves
         message = bytearray(8)
         message[0] = CS_IDENTIFY_NON_CONFIGURED_REMOTE_SLAVE
-        self.__send_command(message)
+        await self.__send_command(message)
 
-    def fast_scan(self):
+    async def fast_scan(self):
         """This command sends a series of fastscan message
         to find unconfigured slave with lowest number of LSS idenities
 
@@ -256,23 +263,23 @@ class LssMaster:
         lss_sub = 0
         lss_next = 0
 
-        if self.__send_fast_scan_message(lss_id[0], lss_bit_check, lss_sub, lss_next):
-            time.sleep(0.01)
+        if await self.__send_fast_scan_message(lss_id[0], lss_bit_check, lss_sub, lss_next):
+            await asyncio.sleep(0.01)
             while lss_sub < 4:
                 lss_bit_check = 32
                 while lss_bit_check > 0:
                     lss_bit_check -= 1
 
-                    if not self.__send_fast_scan_message(lss_id[lss_sub], lss_bit_check, lss_sub, lss_next):
+                    if not await self.__send_fast_scan_message(lss_id[lss_sub], lss_bit_check, lss_sub, lss_next):
                         lss_id[lss_sub] |= 1<<lss_bit_check
 
-                    time.sleep(0.01)
+                    await asyncio.sleep(0.01)
 
                 lss_next = (lss_sub + 1) & 3
-                if not self.__send_fast_scan_message(lss_id[lss_sub], lss_bit_check, lss_sub, lss_next):
+                if not await self.__send_fast_scan_message(lss_id[lss_sub], lss_bit_check, lss_sub, lss_next):
                     return False, None
 
-                time.sleep(0.01)
+                await asyncio.sleep(0.01)
 
                 # Now the next 32 bits will be scanned
                 lss_sub += 1
@@ -282,11 +289,11 @@ class LssMaster:
 
         return False, None
 
-    def __send_fast_scan_message(self, id_number, bit_checker, lss_sub, lss_next):
+    async def __send_fast_scan_message(self, id_number, bit_checker, lss_sub, lss_next):
         message = bytearray(8)
         message[0:8] = struct.pack('<BIBBB', CS_FAST_SCAN, id_number, bit_checker, lss_sub, lss_next)
         try:
-            recv_msg = self.__send_command(message)
+            recv_msg = await self.__send_command(message)
         except LssError:
             return False
 
@@ -296,19 +303,19 @@ class LssMaster:
 
         return False
 
-    def __send_lss_address(self, req_cs, number):
+    async def __send_lss_address(self, req_cs, number):
         message = bytearray(8)
 
         message[0] = req_cs
         message[1:5] = struct.pack('<I', number)
-        response = self.__send_command(message)
+        response = await self.__send_command(message)
         # some device needs these delays between messages
         # because it can't handle messages arriving with no delay
-        time.sleep(0.2)
+        await asyncio.sleep(0.2)
 
         return response
 
-    def __send_inquire_node_id(self):
+    async def __send_inquire_node_id(self):
         """
         :return:
             Current node id
@@ -316,7 +323,7 @@ class LssMaster:
         """
         message = bytearray(8)
         message[0] = CS_INQUIRE_NODE_ID
-        response = self.__send_command(message)
+        response = await self.__send_command(message)
 
         cs, current_node_id = struct.unpack_from("<BB", response)
 
@@ -325,7 +332,7 @@ class LssMaster:
 
         return current_node_id
 
-    def __send_inquire_lss_address(self, req_cs):
+    async def __send_inquire_lss_address(self, req_cs):
         """
         :return:
             part of address. e.g., vendor ID or product code,  ..
@@ -333,7 +340,7 @@ class LssMaster:
         """
         message = bytearray(8)
         message[0] = req_cs
-        response = self.__send_command(message)
+        response = await self.__send_command(message)
 
         res_cs, part_of_address = struct.unpack_from("<BI", response)
 
@@ -342,13 +349,13 @@ class LssMaster:
 
         return part_of_address
 
-    def __send_configure(self, req_cs, value1=0, value2=0):
+    async def __send_configure(self, req_cs, value1=0, value2=0):
         """Send a message to set a key with values"""
         message = bytearray(8)
         message[0] = req_cs
         message[1] = value1
         message[2] = value2
-        response = self.__send_command(message)
+        response = await self.__send_command(message)
 
         res_cs, error_code = struct.unpack_from("<BB", response)
 
@@ -359,7 +366,7 @@ class LssMaster:
             error_msg = f"LSS Error: {error_code}"
             raise LssError(error_msg)
 
-    def __send_command(self, message):
+    async def __send_command(self, message):
         """Send a LSS operation code to the network
 
         :param bytearray message:
@@ -376,9 +383,9 @@ class LssMaster:
         response = None
         if not self.responses.empty():
             logger.info("There were unexpected messages in the queue")
-            self.responses = queue.Queue()
+            self.responses = asyncio.Queue()
 
-        self.network.send_message(self.LSS_TX_COBID, message)
+        await self.network.send_message(self.LSS_TX_COBID, message)
 
         if not bool(message[0] in ListMessageNeedResponse):
             return response
@@ -386,15 +393,15 @@ class LssMaster:
         # Wait for the slave to respond
         # TODO check if the response is LSS response message
         try:
-            response = self.responses.get(
-                block=True, timeout=self.RESPONSE_TIMEOUT)
-        except queue.Empty:
+            response = await asyncio.wait_for(
+                self.responses.get(), self.RESPONSE_TIMEOUT)
+        except asyncio.TimeoutError:
             raise LssError("No LSS response received")
 
         return response
 
     def on_message_received(self, can_id, data, timestamp):
-        self.responses.put(bytes(data))
+        self.responses.put_nowait(bytes(data))
 
 
 class LssError(Exception):

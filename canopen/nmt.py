@@ -1,18 +1,27 @@
-import logging
+import asyncio
 import struct
-import threading
 import time
-from typing import Callable, Final, Optional, TYPE_CHECKING
+
+try:
+    from collections.abc import Callable
+except ImportError:
+    pass
+
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except ImportError:
+    class _Logger:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): pass
+        def error(self, *a, **k): pass
+    logger = _Logger()
 
 import canopen.network
 
-if TYPE_CHECKING:
-    from canopen.network import PeriodicMessageTask
 
-
-logger = logging.getLogger(__name__)
-
-NMT_STATES: Final[dict[int, str]] = {
+NMT_STATES: dict[int, str] = {
     0: 'INITIALISING',
     4: 'STOPPED',
     5: 'OPERATIONAL',
@@ -21,7 +30,7 @@ NMT_STATES: Final[dict[int, str]] = {
     127: 'PRE-OPERATIONAL'
 }
 
-NMT_COMMANDS: Final[dict[str, int]] = {
+NMT_COMMANDS: dict[str, int] = {
     'OPERATIONAL': 1,
     'STOPPED': 2,
     'SLEEP': 80,
@@ -32,7 +41,7 @@ NMT_COMMANDS: Final[dict[str, int]] = {
     'RESET COMMUNICATION': 130
 }
 
-COMMAND_TO_STATE: Final[dict[int, int]] = {
+COMMAND_TO_STATE: dict[int, int] = {
     1: 5,
     2: 4,
     80: 80,
@@ -113,10 +122,10 @@ class NmtMaster(NmtBase):
     def __init__(self, node_id: int):
         super(NmtMaster, self).__init__(node_id)
         self._state_received = None
-        self._node_guarding_producer: Optional[PeriodicMessageTask] = None
+        self._node_guarding_producer: PeriodicMessageTask | None = None
         #: Timestamp of last heartbeat message
-        self.timestamp: Optional[float] = None
-        self.state_update = threading.Condition()
+        self.timestamp: float | None = None
+        self._state_event = asyncio.Event()
         self._callbacks: list[Callable[[int], None]] = []
 
     def on_heartbeat(self, can_id, data, timestamp):
@@ -125,15 +134,14 @@ class NmtMaster(NmtBase):
         new_state &= 0x7F
         logger.debug("Received heartbeat can-id %d, state is %d", can_id, new_state)
 
-        with self.state_update:
-            self.timestamp = timestamp
-            if new_state == 0:
-                # Boot-up, will go to PRE-OPERATIONAL automatically
-                self._state = 127
-            else:
-                self._state = new_state
-            self._state_received = new_state
-            self.state_update.notify_all()
+        self.timestamp = timestamp
+        if new_state == 0:
+            # Boot-up, will go to PRE-OPERATIONAL automatically
+            self._state = 127
+        else:
+            self._state = new_state
+        self._state_received = new_state
+        self._state_event.set()
 
         for callback in self._callbacks:
             callback(new_state)
@@ -149,24 +157,28 @@ class NmtMaster(NmtBase):
             "Sending NMT command 0x%X to node %d", code, self.id)
         self.network.send_message(0, [code, self.id])
 
-    def wait_for_heartbeat(self, timeout: float = 10):
+    async def wait_for_heartbeat(self, timeout: float = 10):
         """Wait until a heartbeat message is received."""
-        with self.state_update:
-            self._state_received = None
-            self.state_update.wait(timeout)
-        if self._state_received is None:
+        self._state_received = None
+        self._state_event.clear()
+        try:
+            await asyncio.wait_for(self._state_event.wait(), timeout)
+        except asyncio.TimeoutError:
             raise NmtError("No boot-up or heartbeat received")
         return self.state
 
-    def wait_for_bootup(self, timeout: float = 10) -> None:
+    async def wait_for_bootup(self, timeout: float = 10) -> None:
         """Wait until a boot-up message is received."""
         end_time = time.time() + timeout
         while True:
-            now = time.time()
-            with self.state_update:
-                self._state_received = None
-                self.state_update.wait(end_time - now + 0.1)
-            if now > end_time:
+            remaining = end_time - time.time()
+            if remaining <= 0:
+                raise NmtError("Timeout waiting for boot-up message")
+            self._state_received = None
+            self._state_event.clear()
+            try:
+                await asyncio.wait_for(self._state_event.wait(), remaining)
+            except asyncio.TimeoutError:
                 raise NmtError("Timeout waiting for boot-up message")
             if self._state_received == 0:
                 break
@@ -206,7 +218,7 @@ class NmtSlave(NmtBase):
 
     def __init__(self, node_id: int, local_node):
         super(NmtSlave, self).__init__(node_id)
-        self._send_task: Optional[PeriodicMessageTask] = None
+        self._send_task: PeriodicMessageTask | None = None
         self._heartbeat_time_ms = 0
         self._local_node = local_node
 

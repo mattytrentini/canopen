@@ -1,8 +1,18 @@
-from __future__ import annotations
+try:
+    from collections.abc import Callable
+except ImportError:
+    pass
 
-import logging
-from collections.abc import Callable
-from typing import Union
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except ImportError:
+    class _Logger:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): pass
+        def error(self, *a, **k): pass
+    logger = _Logger()
 
 import canopen.network
 from canopen import objectdictionary
@@ -12,9 +22,6 @@ from canopen.node.base import BaseNode
 from canopen.objectdictionary import ObjectDictionary
 from canopen.pdo import PDO, RPDO, TPDO
 from canopen.sdo import SdoAbortedError, SdoServer
-
-
-logger = logging.getLogger(__name__)
 
 
 class LocalNode(BaseNode):
@@ -37,7 +44,7 @@ class LocalNode(BaseNode):
     def __init__(
         self,
         node_id: int,
-        object_dictionary: Union[ObjectDictionary, str],
+        object_dictionary: ObjectDictionary | str,
     ):
         super(LocalNode, self).__init__(node_id, object_dictionary)
 
@@ -54,7 +61,7 @@ class LocalNode(BaseNode):
         self.add_write_callback(self.nmt.on_write)
         self.emcy = EmcyProducer(0x80 + self.id)
 
-    def associate_network(self, network: canopen.network.Network):
+    def associate_network(self, network: "canopen.network.Network"):
         if self.has_network():
             raise RuntimeError("Node is already associated with a network")
         self.network = network

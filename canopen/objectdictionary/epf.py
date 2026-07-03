@@ -1,11 +1,21 @@
-import logging
-import xml.etree.ElementTree as etree
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except ImportError:
+    class _Logger:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): pass
+        def error(self, *a, **k): pass
+    logger = _Logger()
+
+try:
+    import xml.etree.ElementTree as etree
+except ImportError:
+    etree = None
 
 from canopen import objectdictionary
 from canopen.objectdictionary import ObjectDictionary
-
-
-logger = logging.getLogger(__name__)
 
 DATA_TYPES = {
     "BOOLEAN": objectdictionary.BOOLEAN,
@@ -32,6 +42,8 @@ def import_epf(epf):
         The Object Dictionary.
     :rtype: canopen.ObjectDictionary
     """
+    if etree is None:
+        raise ImportError("EPF support requires xml.etree (not available on MicroPython)")
     od = ObjectDictionary()
     if etree.iselement(epf):
         tree = epf

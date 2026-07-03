@@ -1,6 +1,16 @@
 # inspired by the NmtMaster code
-import logging
 import time
+
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except ImportError:
+    class _Logger:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): pass
+        def error(self, *a, **k): pass
+    logger = _Logger()
 
 from canopen.node import RemoteNode
 from canopen.pdo import PdoMap

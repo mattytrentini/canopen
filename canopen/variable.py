@@ -1,14 +1,21 @@
-from __future__ import annotations
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except ImportError:
+    class _Logger:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): pass
+        def error(self, *a, **k): pass
+    logger = _Logger()
 
-import logging
-from collections.abc import Collection, Mapping
-from typing import Union
+try:
+    from collections.abc import Mapping
+except ImportError:
+    Mapping = object
 
 from canopen import objectdictionary
 from canopen.utils import pretty_index
-
-
-logger = logging.getLogger(__name__)
 
 
 class Variable:
@@ -48,7 +55,7 @@ class Variable:
         self.set_data(data)
 
     @property
-    def raw(self) -> Union[int, bool, float, str, bytes]:
+    def raw(self) -> int | bool | float | str | bytes:
         """Raw representation of the object.
 
         This table lists the translations between object dictionary data types
@@ -88,14 +95,14 @@ class Variable:
         return value
 
     @raw.setter
-    def raw(self, value: Union[int, bool, float, str, bytes]):
+    def raw(self, value: int | bool | float | str | bytes):
         logger.debug("Writing %r (0x%04X:%02X) = %r",
                      self.name, self.index,
                      self.subindex, value)
         self.data = self.od.encode_raw(value)
 
     @property
-    def phys(self) -> Union[int, bool, float, str, bytes]:
+    def phys(self) -> int | bool | float | str | bytes:
         """Physical value scaled with some factor (defaults to 1).
 
         On object dictionaries that support specifying a factor, this can be
@@ -108,7 +115,7 @@ class Variable:
         return value
 
     @phys.setter
-    def phys(self, value: Union[int, bool, float, str, bytes]):
+    def phys(self, value: int | bool | float | str | bytes):
         self.raw = self.od.encode_phys(value)
 
     @property
@@ -129,11 +136,11 @@ class Variable:
         self.raw = self.od.encode_desc(desc)
 
     @property
-    def bits(self) -> Bits:
+    def bits(self) -> "Bits":
         """Access bits using integers, slices, or bit descriptions."""
         return Bits(self)
 
-    def read(self, fmt: str = "raw") -> Union[int, bool, float, str, bytes]:
+    def read(self, fmt: str = "raw") -> int | bool | float | str | bytes:
         """Alternative way of reading using a function instead of attributes.
 
         May be useful for asynchronous reading.
@@ -158,7 +165,7 @@ class Variable:
 
     def write(
         self,
-        value: Union[int, bool, float, str, bytes],
+        value: int | bool | float | str | bytes,
         fmt: str = "raw",
     ) -> None:
         """Alternative way of writing using a function instead of attributes.
@@ -191,7 +198,7 @@ class Bits(Mapping):
         self.raw: int
 
     @staticmethod
-    def _get_bits(key: Union[slice, int, str, Collection[int]]) -> Union[str, Collection[int]]:
+    def _get_bits(key: slice | int | str | list[int]) -> str | list[int]:
         if isinstance(key, slice):
             if key.stop is None:
                 raise IndexError("Bits cannot be enumerated from open-ended slice")
@@ -201,10 +208,10 @@ class Bits(Mapping):
             return [key]
         return key
 
-    def __getitem__(self, key: Union[slice, int, str, Collection[int]]) -> int:
+    def __getitem__(self, key: slice | int | str | list[int]) -> int:
         return self.variable.od.decode_bits(self.raw, self._get_bits(key))
 
-    def __setitem__(self, key: Union[slice, int, str, Collection[int]], value: int):
+    def __setitem__(self, key: slice | int | str | list[int], value: int):
         self.raw = self.variable.od.encode_bits(
             self.raw, self._get_bits(key), value)
         self.write()
