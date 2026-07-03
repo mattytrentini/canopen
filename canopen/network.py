@@ -1,12 +1,5 @@
-try:
-    import threading
-except ImportError:
-    threading = None
-
-try:
-    from collections.abc import Callable
-except ImportError:
-    pass
+import asyncio
+import time
 
 try:
     import logging
@@ -20,18 +13,9 @@ except ImportError:
     logger = _Logger()
 
 try:
-    from collections.abc import MutableMapping
+    from collections.abc import MutableMapping, Callable
 except ImportError:
     MutableMapping = object
-
-try:
-    import can
-except ImportError:
-    class _CanStub:
-        class Listener:
-            def stop(self): pass
-        CanError = Exception
-    can = _CanStub()
 
 from canopen.lss import LssMaster
 from canopen.nmt import NmtMaster
@@ -45,24 +29,19 @@ from canopen.timestamp import TimeProducer
 class Network(MutableMapping):
     """Representation of one CAN bus containing one or more nodes."""
 
-    NOTIFIER_CYCLE: float = 1.0  #: Maximum waiting time for one notifier iteration.
-    NOTIFIER_SHUTDOWN_TIMEOUT: float = 5.0  #: Maximum waiting time to stop notifiers.
-
     def __init__(self, bus: object = None):
         """
         :param bus:
-            A CAN bus instance to re-use.
+            A CAN bus instance to re-use (aiocan.Bus).
         """
         #: CAN bus instance, set after :meth:`canopen.Network.connect` is called
         self.bus = bus
         #: A :class:`~canopen.network.NodeScanner` for detecting nodes
         self.scanner = NodeScanner(self)
-        #: List of listener objects. Includes at least MessageListener.
-        self.listeners: list = [MessageListener(self)]
-        self.notifier: object | None = None
         self.nodes: dict[int, RemoteNode | LocalNode] = {}
-        self.subscribers: dict[int, list[Callable[[int, bytearray, float], None]]] = {}
-        self.send_lock = threading.Lock()
+        self.subscribers: dict[int, list] = {}
+        #: One asyncio.Task per subscribed COB-ID, created when connect() is called
+        self._listener_tasks: dict[int, asyncio.Task] = {}
         self.sync = SyncProducer(self)
         self.time = TimeProducer(self)
         self.nmt = NmtMaster(0)
@@ -72,7 +51,11 @@ class Network(MutableMapping):
         self.lss.network = self
         self.subscribe(self.lss.LSS_RX_COBID, self.lss.on_message_received)
 
-    def subscribe(self, can_id: int, callback: Callable[[int, bytearray, float], None]) -> None:
+        if bus is not None:
+            for can_id in self.subscribers:
+                self._start_listener(can_id)
+
+    def subscribe(self, can_id: int, callback) -> None:
         """Listen for messages with a specific CAN ID.
 
         :param can_id:
@@ -80,11 +63,13 @@ class Network(MutableMapping):
         :param callback:
             Function to call when message is received.
         """
-        self.subscribers.setdefault(can_id, list())
+        self.subscribers.setdefault(can_id, [])
         if callback not in self.subscribers[can_id]:
             self.subscribers[can_id].append(callback)
+        if self.bus is not None:
+            self._start_listener(can_id)
 
-    def unsubscribe(self, can_id, callback=None) -> None:
+    def unsubscribe(self, can_id: int, callback=None) -> None:
         """Stop listening for message.
 
         :param int can_id:
@@ -95,65 +80,54 @@ class Network(MutableMapping):
         """
         if callback is not None:
             self.subscribers[can_id].remove(callback)
-        if not self.subscribers[can_id] or callback is None:
-            del self.subscribers[can_id]
+        if not self.subscribers.get(can_id) or callback is None:
+            self.subscribers.pop(can_id, None)
+            task = self._listener_tasks.pop(can_id, None)
+            if task is not None:
+                task.cancel()
 
-    def connect(self, *args, **kwargs) -> "Network":
-        """Connect to CAN bus using python-can.
+    def connect(self, bus) -> "Network":
+        """Connect to CAN bus.
 
-        Arguments are passed directly to :class:`can.BusABC`. Typically these
-        may include:
-
-        :param channel:
-            Backend specific channel for the CAN interface.
-        :param str interface:
-            Name of the interface. See
-            `python-can manual <https://python-can.readthedocs.io/en/stable/configuration.html#interface-names>`__
-            for full list of supported interfaces.
-        :param int bitrate:
-            Bitrate in bit/s.
-
-        :raises can.CanError:
-            When connection fails.
+        :param bus:
+            An :class:`aiocan.Bus` instance wrapping a configured
+            ``machine.CAN`` object.
         """
-        # If bitrate has not been specified, try to find one node where bitrate
-        # has been specified
-        if "bitrate" not in kwargs:
-            for node in self.nodes.values():
-                if node.object_dictionary.bitrate:
-                    kwargs["bitrate"] = node.object_dictionary.bitrate
-                    break
-        if self.bus is None:
-            self.bus = can.Bus(*args, **kwargs)
-        logger.info("Connected to '%s'", self.bus.channel_info)
-        if self.notifier is None:
-            self.notifier = can.Notifier(self.bus, self.listeners, self.NOTIFIER_CYCLE)
+        self.bus = bus
+        logger.info("Connected to CAN bus")
+        for can_id in self.subscribers:
+            self._start_listener(can_id)
         return self
 
-    def disconnect(self) -> None:
-        """Disconnect from the CAN bus.
+    def _start_listener(self, can_id: int) -> None:
+        """Create a listener task for *can_id* if one doesn't already exist."""
+        if can_id not in self._listener_tasks:
+            self._listener_tasks[can_id] = asyncio.create_task(self._listen(can_id))
 
-        Must be overridden in a subclass if a custom interface is used.
-        """
+    async def _listen(self, can_id: int) -> None:
+        """Receive loop: dispatch every frame on *can_id* through notify()."""
+        async with self.bus.subscribe(can_id) as q:
+            while True:
+                msg = await q.get()
+                self.notify(can_id, msg.data, time.time())
+
+    async def disconnect(self) -> None:
+        """Disconnect from the CAN bus."""
         for node in self.nodes.values():
             if hasattr(node, "pdo"):
                 node.pdo.stop()
-        if self.notifier is not None:
-            self.notifier.stop(self.NOTIFIER_SHUTDOWN_TIMEOUT)
+        for task in self._listener_tasks.values():
+            task.cancel()
+        self._listener_tasks.clear()
         if self.bus is not None:
-            self.bus.shutdown()
-        self.bus = None
-        try:
-            self.check()
-        finally:
-            # Release notifier after check
-            self.notifier = None
+            await self.bus.deinit()
+            self.bus = None
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, type, value, traceback):
-        self.disconnect()
+    async def __aexit__(self, *args):
+        await self.disconnect()
 
     def add_node(
         self,
@@ -206,32 +180,19 @@ class Network(MutableMapping):
         self[node.id] = node
         return node
 
-    def send_message(self, can_id: int, data: bytes, remote: bool = False) -> None:
+    async def send_message(self, can_id: int, data: bytes, remote: bool = False) -> None:
         """Send a raw CAN message to the network.
-
-        This method may be overridden in a subclass if you need to integrate
-        this library with a custom backend.
-        It is safe to call this from multiple threads.
 
         :param int can_id:
             CAN-ID of the message
         :param data:
             Data to be transmitted (anything that can be converted to bytes)
         :param bool remote:
-            Set to True to send remote frame
-
-        :raises can.CanError:
-            When the message fails to be transmitted
+            Set to True to send remote frame (deferred — rarely needed in CANopen)
         """
         if not self.bus:
             raise RuntimeError("Not connected to CAN bus")
-        msg = can.Message(is_extended_id=can_id > 0x7FF,
-                          arbitration_id=can_id,
-                          data=data,
-                          is_remote_frame=remote)
-        with self.send_lock:
-            self.bus.send(msg)
-        self.check()
+        await self.bus.send(can_id, bytes(data))
 
     def send_periodic(
         self, can_id: int, data: bytes, period: float, remote: bool = False
@@ -245,12 +206,13 @@ class Network(MutableMapping):
         :param period:
             Seconds between each message
         :param remote:
-            indicates if the message frame is a remote request to the slave node
+            Ignored (RTR periodic not supported by aiocan)
 
         :return:
-            An task object with a ``.stop()`` method to stop the transmission
+            A task object with ``.stop()`` and ``.update()`` methods.
         """
-        return PeriodicMessageTask(can_id, data, period, self.bus, remote)
+        pt = self.bus.send_periodic(can_id, data, int(period * 1000))
+        return PeriodicMessageTask(pt)
 
     def notify(self, can_id: int, data: bytearray, timestamp: float) -> None:
         """Feed incoming message to this library.
@@ -272,16 +234,7 @@ class Network(MutableMapping):
         self.scanner.on_message_received(can_id)
 
     def check(self) -> None:
-        """Check that no fatal error has occurred in the receiving thread.
-
-        If an exception caused the thread to terminate, that exception will be
-        raised.
-        """
-        if self.notifier is not None:
-            exc = self.notifier.exception
-            if exc is not None:
-                logger.error("An error has caused receiving of messages to stop")
-                raise exc
+        """No-op — no background thread to check."""
 
     def __getitem__(self, node_id: int) -> RemoteNode | LocalNode:
         return self.nodes[node_id]
@@ -289,7 +242,6 @@ class Network(MutableMapping):
     def __setitem__(self, node_id: int, node: RemoteNode | LocalNode):
         assert node_id == node.id
         if node_id in self.nodes:
-            # Remove old callbacks
             self.nodes[node_id].remove_network()
         self.nodes[node_id] = node
         node.associate_network(self)
@@ -321,82 +273,18 @@ _UNINITIALIZED_NETWORK: Network = _UninitializedNetwork()
 
 
 class PeriodicMessageTask:
-    """
-    Task object to transmit a message periodically using python-can's
-    CyclicSendTask
-    """
+    """Wraps an aiocan.PeriodicTask to match the canopen API."""
 
-    def __init__(
-        self,
-        can_id: int,
-        data: bytes,
-        period: float,
-        bus,
-        remote: bool = False,
-    ):
-        """
-        :param can_id:
-            CAN-ID of the message
-        :param data:
-            Data to be transmitted (anything that can be converted to bytes)
-        :param period:
-            Seconds between each message
-        :param can.BusABC bus:
-            python-can bus to use for transmission
-        """
-        self.bus = bus
-        self.period = period
-        self.msg = can.Message(is_extended_id=can_id > 0x7FF,
-                               arbitration_id=can_id,
-                               data=data, is_remote_frame=remote)
-        self._start()
-
-    def _start(self):
-        self._task = self.bus.send_periodic(self.msg, self.period)
-
-    def stop(self):
-        """Stop transmission"""
-        self._task.stop()
-
-    def update(self, data: bytes) -> None:
-        """Update data of message
-
-        :param data:
-            New data to transmit
-        """
-        new_data = bytearray(data)
-        old_data = self.msg.data
-        self.msg.data = new_data
-        if hasattr(self._task, "modify_data"):
-            self._task.modify_data(self.msg)
-        elif new_data != old_data:
-            # Stop and start (will mess up period unfortunately)
-            self._task.stop()
-            self._start()
-
-
-class MessageListener(can.Listener):
-    """Listens for messages on CAN bus and feeds them to a Network instance.
-
-    :param network:
-        The network to notify on new messages.
-    """
-
-    def __init__(self, network: Network):
-        self.network = network
-
-    def on_message_received(self, msg):
-        if msg.is_error_frame or msg.is_remote_frame:
-            return
-
-        try:
-            self.network.notify(msg.arbitration_id, msg.data, msg.timestamp)
-        except Exception as e:
-            # Exceptions in any callbaks should not affect CAN processing
-            logger.error(str(e))
+    def __init__(self, task):
+        self._task = task
 
     def stop(self) -> None:
-        """Override abstract base method to release any resources."""
+        """Stop transmission."""
+        self._task.cancel()
+
+    def update(self, data: bytes) -> None:
+        """Update the payload for subsequent transmissions."""
+        self._task.update(data)
 
 
 class NodeScanner:
@@ -414,7 +302,7 @@ class NodeScanner:
 
     SERVICES = (0x700, 0x580, 0x180, 0x280, 0x380, 0x480, 0x80)
 
-    def __init__(self, network: Network | None = None):
+    def __init__(self, network: "Network | None" = None):
         if network is None:
             network = _UNINITIALIZED_NETWORK
         self.network: Network = network
@@ -431,8 +319,8 @@ class NodeScanner:
         """Clear list of found nodes."""
         self.nodes = []
 
-    def search(self, limit: int = 127) -> None:
+    async def search(self, limit: int = 127) -> None:
         """Search for nodes by sending SDO requests to all node IDs."""
         sdo_req = b"\x40\x00\x10\x00\x00\x00\x00\x00"
         for node_id in range(1, limit + 1):
-            self.network.send_message(0x600 + node_id, sdo_req)
+            await self.network.send_message(0x600 + node_id, sdo_req)
