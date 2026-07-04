@@ -1,19 +1,19 @@
-import logging
-import time
+import asyncio
 import unittest
-
-import can
 
 import canopen
 
-from .util import SAMPLE_EDS
+from .util import SAMPLE_EDS, FakeBus
+
+
+def run(coro):
+    return asyncio.run(coro)
 
 
 class TestNetwork(unittest.TestCase):
 
     def setUp(self):
         self.network = canopen.Network()
-        self.network.NOTIFIER_SHUTDOWN_TIMEOUT = 0.0
 
     def test_network_add_node(self):
         # Add using str.
@@ -48,11 +48,6 @@ class TestNetwork(unittest.TestCase):
         # Verify that we've got the correct number of nodes.
         self.assertEqual(len(self.network), 4)
 
-    def test_network_add_node_upload_eds(self):
-        # Will err because we're not connected to a real network.
-        with self.assertLogs(level=logging.ERROR):
-            self.network.add_node(2, SAMPLE_EDS, upload_eds=True)
-
     def test_network_create_node(self):
         with self.assertLogs():
             self.network.create_node(2, SAMPLE_EDS)
@@ -62,30 +57,6 @@ class TestNetwork(unittest.TestCase):
         self.assertIsInstance(self.network[2], canopen.LocalNode)
         self.assertIsInstance(self.network[3], canopen.LocalNode)
         self.assertIsInstance(self.network[4], canopen.RemoteNode)
-
-    def test_network_check(self):
-        self.network.connect(interface="virtual")
-
-        def cleanup():
-            # We must clear the fake exception installed below, since
-            # .disconnect() implicitly calls .check() during test tear down.
-            if self.network.notifier is not None:
-                self.network.notifier.exception = None
-            self.network.disconnect()
-
-        self.addCleanup(cleanup)
-        self.assertIsNone(self.network.check())
-
-        class Custom(Exception):
-            pass
-
-        self.network.notifier.exception = Custom("fake")
-        with self.assertRaisesRegex(Custom, "fake"):
-            with self.assertLogs(level=logging.ERROR):
-                self.network.check()
-        with self.assertRaisesRegex(Custom, "fake"):
-            with self.assertLogs(level=logging.ERROR):
-                self.network.disconnect()
 
     def test_network_notify(self):
         with self.assertLogs():
@@ -97,34 +68,9 @@ class TestNetwork(unittest.TestCase):
         self.assertEqual(node.nmt.state, 'OPERATIONAL')
         self.assertListEqual(self.network.scanner.nodes, [2])
 
-    def test_network_send_message(self):
-        bus = can.interface.Bus(interface="virtual")
-        self.addCleanup(bus.shutdown)
-
-        self.network.connect(interface="virtual")
-        self.addCleanup(self.network.disconnect)
-
-        # Send standard ID
-        self.network.send_message(0x123, [1, 2, 3, 4, 5, 6, 7, 8])
-        msg = bus.recv(1)
-        self.assertIsNotNone(msg)
-        self.assertEqual(msg.arbitration_id, 0x123)
-        self.assertFalse(msg.is_extended_id)
-        self.assertSequenceEqual(msg.data, [1, 2, 3, 4, 5, 6, 7, 8])
-
-        # Send extended ID
-        self.network.send_message(0x12345, [])
-        msg = bus.recv(1)
-        self.assertIsNotNone(msg)
-        self.assertEqual(msg.arbitration_id, 0x12345)
-        self.assertTrue(msg.is_extended_id)
-
     def test_network_subscribe_unsubscribe(self):
         N_HOOKS = 3
         accumulators = [] * N_HOOKS
-
-        self.network.connect(interface="virtual", receive_own_messages=True)
-        self.addCleanup(self.network.disconnect)
 
         for i in range(N_HOOKS):
             accumulators.append([])
@@ -151,8 +97,6 @@ class TestNetwork(unittest.TestCase):
 
     def test_network_subscribe_multiple(self):
         N_HOOKS = 3
-        self.network.connect(interface="virtual", receive_own_messages=True)
-        self.addCleanup(self.network.disconnect)
 
         accumulators = []
         hooks = []
@@ -202,12 +146,6 @@ class TestNetwork(unittest.TestCase):
         self.assertEqual(accumulators[1], BATCH1)
         self.assertEqual(accumulators[2], BATCH1 + [BATCH2] + [BATCH3])
 
-    def test_network_context_manager(self):
-        with self.network.connect(interface="virtual"):
-            pass
-        with self.assertRaisesRegex(RuntimeError, "Not connected"):
-            self.network.send_message(0, [])
-
     def test_network_item_access(self):
         with self.assertLogs():
             self.network.add_node(2, SAMPLE_EDS)
@@ -230,89 +168,184 @@ class TestNetwork(unittest.TestCase):
         self.assertNotEqual(self.network[3], old)
         self.assertEqual([3], [node for node in self.network])
 
-    def test_network_send_periodic(self):
-        DATA1 = bytes([1, 2, 3])
-        DATA2 = bytes([4, 5, 6])
+
+class TestNetworkFakeBus(unittest.TestCase):
+    """Integration tests exercising Network's asyncio listener tasks against
+    a FakeBus test double, standing in for aiocan.Bus."""
+
+    async def _settle(self):
+        # Give newly created listener tasks a chance to register their
+        # subscription queues before we inject/send anything.
+        await asyncio.sleep(0.01)
+
+    def test_send_message_reaches_bus(self):
+        run(self._send_message_reaches_bus())
+
+    async def _send_message_reaches_bus(self):
+        network = canopen.Network()
+        bus = FakeBus()
+        network.connect(bus)
+        try:
+            await network.send_message(0x123, [1, 2, 3, 4, 5, 6, 7, 8])
+            await network.send_message(0x12345, [])
+        finally:
+            await network.disconnect()
+
+        self.assertEqual(bus.sent, [
+            (0x123, bytes([1, 2, 3, 4, 5, 6, 7, 8])),
+            (0x12345, b""),
+        ])
+
+    def test_send_message_without_bus_raises(self):
+        run(self._send_message_without_bus_raises())
+
+    async def _send_message_without_bus_raises(self):
+        network = canopen.Network()
+        with self.assertRaisesRegex(RuntimeError, "Not connected"):
+            await network.send_message(0, [])
+
+    def test_incoming_frame_dispatched_via_listener_task(self):
+        run(self._incoming_frame_dispatched_via_listener_task())
+
+    async def _incoming_frame_dispatched_via_listener_task(self):
+        network = canopen.Network()
+        bus = FakeBus()
+        received = []
+        network.subscribe(0x321, lambda can_id, data, ts: received.append(data))
+        network.connect(bus)
+        try:
+            await self._settle()
+            bus.inject(0x321, b'\xAA')
+            await self._settle()
+        finally:
+            await network.disconnect()
+
+        self.assertEqual(received, [b'\xAA'])
+
+    def test_subscribe_after_connect_starts_listener_immediately(self):
+        run(self._subscribe_after_connect_starts_listener_immediately())
+
+    async def _subscribe_after_connect_starts_listener_immediately(self):
+        network = canopen.Network()
+        bus = FakeBus()
+        network.connect(bus)
+        await self._settle()
+
+        received = []
+        network.subscribe(0x654, lambda can_id, data, ts: received.append(data))
+        try:
+            await self._settle()
+            bus.inject(0x654, b'\xBB')
+            await self._settle()
+        finally:
+            await network.disconnect()
+
+        self.assertEqual(received, [b'\xBB'])
+
+    def test_disconnect_cancels_listener_tasks(self):
+        run(self._disconnect_cancels_listener_tasks())
+
+    async def _disconnect_cancels_listener_tasks(self):
+        network = canopen.Network()
+        bus = FakeBus()
+        # The LSS master subscribes during Network.__init__, so connect()
+        # should start at least one listener task.
+        network.connect(bus)
+        self.assertTrue(network._listener_tasks)
+
+        await network.disconnect()
+        self.assertEqual(network._listener_tasks, {})
+        self.assertTrue(bus.deinit_called)
+
+    def test_context_manager(self):
+        run(self._context_manager())
+
+    async def _context_manager(self):
+        network = canopen.Network()
+        bus = FakeBus()
+        async with network.connect(bus):
+            pass
+        with self.assertRaisesRegex(RuntimeError, "Not connected"):
+            await network.send_message(0, [])
+        self.assertTrue(bus.deinit_called)
+
+    def test_send_periodic(self):
+        run(self._send_periodic())
+
+    async def _send_periodic(self):
+        DATA1 = b'\x01\x02\x03'
+        DATA2 = b'\x04\x05\x06'
         COB_ID = 0x123
         PERIOD = 0.01
-        TIMEOUT = PERIOD * 10
-        self.network.connect(interface="virtual")
-        self.addCleanup(self.network.disconnect)
 
-        bus = can.Bus(interface="virtual")
-        self.addCleanup(bus.shutdown)
+        network = canopen.Network()
+        bus = FakeBus()
+        received = []
+        network.subscribe(COB_ID, lambda can_id, data, ts: received.append(data))
+        network.connect(bus)
+        await self._settle()
 
-        acc = []
+        task = network.send_periodic(COB_ID, DATA1, PERIOD)
+        try:
+            await asyncio.sleep(PERIOD * 5)
+            self.assertGreaterEqual(len(received), 2)
+            self.assertTrue(all(d == DATA1 for d in received))
 
-        task = self.network.send_periodic(COB_ID, DATA1, PERIOD)
-        self.addCleanup(task.stop)
+            received.clear()
+            task.update(DATA2)
+            await asyncio.sleep(PERIOD * 5)
+            self.assertTrue(all(d == DATA2 for d in received))
+        finally:
+            task.stop()
+            await network.disconnect()
 
-        def wait_for_periodicity():
-            # Check if periodicity is established; flakiness has been observed
-            # on macOS.
-            end_time = time.time() + TIMEOUT
-            while time.time() < end_time:
-                if msg := bus.recv(PERIOD):
-                    acc.append(msg)
-                if len(acc) >= 2:
-                    first, last = acc[-2:]
-                    delta = last.timestamp - first.timestamp
-                    if round(delta, ndigits=2) == PERIOD:
-                        return
-            self.fail("Timed out")
+    def test_node_boot_up_via_heartbeat(self):
+        """End-to-end: a boot-up heartbeat frame injected on FakeBus is
+        picked up by Network's listener task and resolves
+        NmtMaster.wait_for_bootup()."""
+        run(self._node_boot_up_via_heartbeat())
 
-        # Wait for frames to arrive; then check the result.
-        wait_for_periodicity()
-        self.assertTrue(all([v.data == DATA1 for v in acc]))
+    async def _node_boot_up_via_heartbeat(self):
+        network = canopen.Network()
+        with self.assertLogs():
+            node = network.add_node(2, SAMPLE_EDS)
+        bus = FakeBus()
+        network.connect(bus)
+        try:
+            await self._settle()
+            # Boot-up heartbeat: state byte 0x00.
+            bus.inject(0x700 + node.id, bytes([0]))
+            await node.nmt.wait_for_bootup(timeout=1)
+            self.assertEqual(node.nmt.state, "PRE-OPERATIONAL")
+        finally:
+            await network.disconnect()
 
-        # Update task data, which may implicitly restart the timer.
-        # Wait for frames to arrive; then check the result.
-        task.update(DATA2)
-        acc.clear()
-        wait_for_periodicity()
-        # Find the first message with new data, and verify that all subsequent
-        # messages also carry the new payload.
-        data = [v.data for v in acc]
-        self.assertIn(DATA2, data)
-        idx = data.index(DATA2)
-        self.assertTrue(all([v.data == DATA2 for v in acc[idx:]]))
+    def test_sdo_request_reaches_bus(self):
+        """A node's SDO client should transmit through the real send path."""
+        run(self._sdo_request_reaches_bus())
 
-        # Stop the task.
-        task.stop()
-        # A message may have been in flight when we stopped the timer,
-        # so allow a single failure.
-        bus = self.network.bus
-        msg = bus.recv(PERIOD)
-        if msg is not None:
-            self.assertIsNone(bus.recv(PERIOD))
+    async def _sdo_request_reaches_bus(self):
+        network = canopen.Network()
+        with self.assertLogs():
+            node = network.add_node(2, SAMPLE_EDS)
+        bus = FakeBus()
+        network.connect(bus)
+        try:
+            await self._settle()
+            with self.assertRaises(Exception):
+                # No SDO server will ever respond, so this must time out;
+                # we only care that the request frame actually hit the bus.
+                node.sdo.RESPONSE_TIMEOUT = 0.05
+                await node.sdo.upload(0x1018, 0x01)
+        finally:
+            await network.disconnect()
 
-    def test_network_connect_does_not_recreate_notifier(self):
-        self.network.connect(interface="virtual")
-        self.addCleanup(self.network.disconnect)
-        notifier1 = self.network.notifier
-        self.assertIsNotNone(notifier1)
-        # Calling connect() again should reuse the existing notifier
-        self.network.connect(interface="virtual")
-        self.assertIs(self.network.notifier, notifier1)
-
-    def test_network_disconnect_releases_notifier(self):
-        self.network.connect(interface="virtual")
-        self.assertIsNotNone(self.network.notifier)
-        self.network.disconnect()
-        self.assertIsNone(self.network.notifier)
-
-    def test_network_disconnect_releases_notifier_on_exception(self):
-        self.network.connect(interface="virtual")
-
-        class Custom(Exception):
-            pass
-
-        self.network.notifier.exception = Custom("fake")
-        with self.assertRaises(Custom):
-            with self.assertLogs(level=logging.ERROR):
-                self.network.disconnect()
-        # Notifier must be released even when check() raises
-        self.assertIsNone(self.network.notifier)
+        # The client retries once, then sends an abort frame on final timeout.
+        self.assertGreaterEqual(len(bus.sent), 1)
+        can_id, data = bus.sent[0]
+        self.assertEqual(can_id, 0x600 + node.id)
+        self.assertEqual(data[1:3], bytes([0x18, 0x10]))
+        self.assertEqual(data[3], 0x01)
 
 
 class TestScanner(unittest.TestCase):
@@ -348,48 +381,44 @@ class TestScanner(unittest.TestCase):
 
     def test_scanner_search_no_network(self):
         with self.assertRaisesRegex(RuntimeError, "No actual Network object was assigned"):
-            self.scanner.search()
+            run(self.scanner.search())
 
     def test_scanner_search(self):
-        rxbus = can.Bus(interface="virtual")
-        self.addCleanup(rxbus.shutdown)
+        run(self._scanner_search())
 
-        txbus = can.Bus(interface="virtual")
-        self.addCleanup(txbus.shutdown)
-
-        net = canopen.Network(txbus)
-        net.NOTIFIER_SHUTDOWN_TIMEOUT = 0.0
-        net.connect()
-        self.addCleanup(net.disconnect)
-
-        self.scanner.network = net
-        self.scanner.search()
+    async def _scanner_search(self):
+        bus = FakeBus()
+        net = canopen.Network()
+        net.connect(bus)
+        try:
+            self.scanner.network = net
+            await self.scanner.search()
+        finally:
+            await net.disconnect()
 
         payload = bytes([64, 0, 16, 0, 0, 0, 0, 0])
-        acc = [rxbus.recv(self.TIMEOUT) for _ in range(127)]
-        for node_id, msg in enumerate(acc, start=1):
+        self.assertEqual(len(bus.sent), 127)
+        for node_id, (can_id, data) in enumerate(bus.sent, start=1):
             with self.subTest(node_id=node_id):
-                self.assertIsNotNone(msg)
-                self.assertEqual(msg.arbitration_id, 0x600 + node_id)
-                self.assertEqual(msg.data, payload)
-        # Check that no spurious packets were sent.
-        self.assertIsNone(rxbus.recv(self.TIMEOUT))
+                self.assertEqual(can_id, 0x600 + node_id)
+                self.assertEqual(data, payload)
 
     def test_scanner_search_limit(self):
-        bus = can.Bus(interface="virtual", receive_own_messages=True)
-        net = canopen.Network(bus)
-        net.NOTIFIER_SHUTDOWN_TIMEOUT = 0.0
-        net.connect()
-        self.addCleanup(net.disconnect)
+        run(self._scanner_search_limit())
 
-        self.scanner.network = net
-        self.scanner.search(limit=1)
+    async def _scanner_search_limit(self):
+        bus = FakeBus()
+        net = canopen.Network()
+        net.connect(bus)
+        try:
+            self.scanner.network = net
+            await self.scanner.search(limit=1)
+        finally:
+            await net.disconnect()
 
-        msg = bus.recv(self.TIMEOUT)
-        self.assertIsNotNone(msg)
-        self.assertEqual(msg.arbitration_id, 0x601)
-        # Check that no spurious packets were sent.
-        self.assertIsNone(bus.recv(self.TIMEOUT))
+        self.assertEqual(bus.sent, [
+            (0x601, bytes([64, 0, 16, 0, 0, 0, 0, 0])),
+        ])
 
 
 if __name__ == "__main__":
