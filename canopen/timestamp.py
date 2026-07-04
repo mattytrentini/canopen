@@ -1,3 +1,4 @@
+import asyncio
 import struct
 import time
 
@@ -28,4 +29,4 @@ class TimeProducer:
         delta = (timestamp or time.time()) - OFFSET
         days, seconds = divmod(delta, ONE_DAY)
         data = TIME_OF_DAY_STRUCT.pack(int(seconds * 1000), int(days))
-        self.network.send_message(self.cob_id, data)
+        asyncio.create_task(self.network.send_message(self.cob_id, data))

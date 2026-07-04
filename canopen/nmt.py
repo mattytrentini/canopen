@@ -155,7 +155,7 @@ class NmtMaster(NmtBase):
         super(NmtMaster, self).send_command(code)
         logger.info(
             "Sending NMT command 0x%X to node %d", code, self.id)
-        self.network.send_message(0, [code, self.id])
+        asyncio.create_task(self.network.send_message(0, [code, self.id]))
 
     async def wait_for_heartbeat(self, timeout: float = 10):
         """Wait until a heartbeat message is received."""
@@ -237,7 +237,7 @@ class NmtSlave(NmtBase):
 
         if self._state == 0:
             logger.info("Sending boot-up message")
-            self.network.send_message(0x700 + self.id, [0])
+            asyncio.create_task(self.network.send_message(0x700 + self.id, [0]))
 
         # The heartbeat service should start on the transition
         # between INITIALIZING and PRE-OPERATIONAL state

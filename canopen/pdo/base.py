@@ -555,7 +555,7 @@ class PdoMap:
         """
         if not self.cob_id:
             raise ValueError("A valid COB-ID has not been configured")
-        self.pdo_node.network.send_message(self.cob_id, self.data)
+        asyncio.create_task(self.pdo_node.network.send_message(self.cob_id, self.data))
 
     def start(self, period: float | None = None) -> None:
         """Start periodic transmission of message in a background thread.
@@ -599,7 +599,8 @@ class PdoMap:
         Silently ignore if not allowed.
         """
         if self.enabled and self.rtr_allowed and self.cob_id:
-            self.pdo_node.network.send_message(self.cob_id, bytes(), remote=True)
+            asyncio.create_task(
+                self.pdo_node.network.send_message(self.cob_id, bytes(), remote=True))
 
     async def wait_for_reception(self, timeout: float = 10) -> float | None:
         """Wait for the next transmit PDO.

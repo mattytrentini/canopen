@@ -94,11 +94,11 @@ class EmcyProducer:
 
     def send(self, code: int, register: int = 0, data: bytes = b""):
         payload = EMCY_STRUCT.pack(code, register, data)
-        self.network.send_message(self.cob_id, payload)
+        asyncio.create_task(self.network.send_message(self.cob_id, payload))
 
     def reset(self, register: int = 0, data: bytes = b""):
         payload = EMCY_STRUCT.pack(0, register, data)
-        self.network.send_message(self.cob_id, payload)
+        asyncio.create_task(self.network.send_message(self.cob_id, payload))
 
 
 class EmcyError(Exception):

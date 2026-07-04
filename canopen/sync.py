@@ -1,3 +1,6 @@
+import asyncio
+
+
 class SyncProducer:
     """Transmits a SYNC message periodically."""
 
@@ -18,7 +21,7 @@ class SyncProducer:
             If the counter value does not fit in one byte.
         """
         data = bytes([count]) if count is not None else b""
-        self.network.send_message(self.cob_id, data)
+        asyncio.create_task(self.network.send_message(self.cob_id, data))
 
     def start(self, period: float | None = None):
         """Start periodic transmission of SYNC message in a background thread.

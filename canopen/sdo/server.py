@@ -9,12 +9,11 @@ except ImportError:
         def error(self, *a, **k): pass
     logger = _Logger()
 
+import asyncio
+
 from canopen.sdo.base import SdoBase
 from canopen.sdo.constants import *
 from canopen.sdo.exceptions import *
-
-
-logger = logging.getLogger(__name__)
 
 
 class SdoServer(SdoBase):
@@ -190,7 +189,7 @@ class SdoServer(SdoBase):
         self.send_response(response)
 
     def send_response(self, response):
-        self.network.send_message(self.tx_cobid, response)
+        asyncio.create_task(self.network.send_message(self.tx_cobid, response))
 
     def abort(self, abort_code=ABORT_GENERAL_ERROR):
         """Abort current transfer."""
