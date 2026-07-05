@@ -28,7 +28,7 @@ except ImportError:
 import canopen.network
 from canopen import objectdictionary
 from canopen import variable
-from canopen.sdo import SdoAbortedError
+from canopen.sdo import SdoAbortedError, SdoArray
 
 
 PDO_NOT_VALID = 1 << 31
@@ -461,10 +461,13 @@ class PdoMap:
             # mappings for an invalid object 0x0000:00 to overwrite any
             # excess entries with all-zeros.
             self._fill_map(await self.map_array[0].read())
-        # map_array is usually an SdoArray, whose length can only be known by
-        # reading subindex 0 (network I/O) — collect it explicitly rather
-        # than relying on the synchronous Mapping.values() it no longer has.
-        entries = [self.map_array[i] async for i in self.map_array]
+        # map_array may be an SdoArray (whose length can only be known by
+        # reading subindex 0 -- network I/O) or an SdoRecord (fixed, static
+        # subindices, some EDS files declare the mapping parameter this way).
+        if isinstance(self.map_array, SdoArray):
+            entries = [self.map_array[i] async for i in self.map_array]
+        else:
+            entries = list(self.map_array.values())
         for var, entry in zip(self.map, entries):
             if not entry.od.writable:
                 continue
