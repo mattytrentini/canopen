@@ -50,7 +50,10 @@ class FakePeriodicTask:
     async def _run(self):
         while True:
             await asyncio.sleep(self.period_ms / 1000)
+            self._bus.sent.append((self.can_id, bytes(self.data)))
             self._bus._deliver(self.can_id, bytes(self.data))
+            if self._bus._channel is not None:
+                self._bus._channel._deliver(self._bus, self.can_id, bytes(self.data))
 
     def update(self, data: bytes) -> None:
         self.data = bytearray(data)
@@ -60,6 +63,27 @@ class FakePeriodicTask:
         self._task.cancel()
 
 
+class FakeChannel:
+    """Shared medium connecting multiple FakeBus 'ports'.
+
+    Mimics a python-can virtual bus channel: a frame sent on one port is
+    delivered to every *other* port's subscribers, not its own (i.e. no
+    self-loopback), so two independent Network instances can be wired
+    together to exercise real master/slave message exchange.
+    """
+
+    def __init__(self):
+        self._ports: list["FakeBus"] = []
+
+    def _register(self, port: "FakeBus") -> None:
+        self._ports.append(port)
+
+    def _deliver(self, sender: "FakeBus", can_id: int, data: bytes) -> None:
+        for port in self._ports:
+            if port is not sender:
+                port._deliver(can_id, data)
+
+
 class FakeBus:
     """Minimal async test double for aiocan.Bus.
 
@@ -67,16 +91,24 @@ class FakeBus:
     on (``send``, ``subscribe``, ``send_periodic``, ``deinit``), so
     Network's asyncio task management can be exercised without needing the
     real aiocan package or MicroPython.
+
+    :param channel: Optional :class:`FakeChannel` to share with other
+        FakeBus instances, so frames sent on one are received by the others.
     """
 
-    def __init__(self):
+    def __init__(self, channel: "FakeChannel | None" = None):
         #: Log of every frame passed to send(), as (can_id, data).
         self.sent: list[tuple[int, bytes]] = []
         self._queues: dict[int, list[asyncio.Queue]] = {}
         self.deinit_called = False
+        self._channel = channel
+        if channel is not None:
+            channel._register(self)
 
     async def send(self, can_id: int, data: bytes) -> None:
         self.sent.append((can_id, bytes(data)))
+        if self._channel is not None:
+            self._channel._deliver(self, can_id, bytes(data))
 
     def subscribe(self, can_id: int, maxsize: int = 4) -> _FakeSubscription:
         return _FakeSubscription(self, can_id, maxsize)
