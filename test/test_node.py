@@ -31,15 +31,11 @@ class TestLocalNode(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # No bus connection needed: subscribe()/unsubscribe() are pure
+        # dict bookkeeping until connect() actually starts listener tasks.
         cls.network = canopen.Network()
-        cls.network.NOTIFIER_SHUTDOWN_TIMEOUT = 0.0
-        cls.network.connect(interface="virtual")
 
         cls.node = canopen.LocalNode(2, canopen.objectdictionary.ObjectDictionary())
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.network.disconnect()
 
     def test_associate_network(self):
         # Need to store the number of subscribers before associating because the
@@ -80,15 +76,11 @@ class TestRemoteNode(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # No bus connection needed: subscribe()/unsubscribe() are pure
+        # dict bookkeeping until connect() actually starts listener tasks.
         cls.network = canopen.Network()
-        cls.network.NOTIFIER_SHUTDOWN_TIMEOUT = 0.0
-        cls.network.connect(interface="virtual")
 
         cls.node = canopen.RemoteNode(2, canopen.objectdictionary.ObjectDictionary())
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.network.disconnect()
 
     def test_associate_network(self):
         # Need to store the number of subscribers before associating because the
