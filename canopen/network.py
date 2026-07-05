@@ -32,10 +32,12 @@ class Network(MutableMapping):
     def __init__(self, bus: object = None):
         """
         :param bus:
-            A CAN bus instance to re-use (aiocan.Bus).
+            A CAN bus instance to re-use (aiocan.Bus). Stored for a later
+            no-argument :meth:`connect` call; no listener tasks are created
+            here, since that requires a running event loop.
         """
         #: CAN bus instance, set after :meth:`canopen.Network.connect` is called
-        self.bus = bus
+        self.bus = None
         #: A :class:`~canopen.network.NodeScanner` for detecting nodes
         self.scanner = NodeScanner(self)
         self.nodes: dict[int, RemoteNode | LocalNode] = {}
@@ -51,9 +53,8 @@ class Network(MutableMapping):
         self.lss.network = self
         self.subscribe(self.lss.LSS_RX_COBID, self.lss.on_message_received)
 
-        if bus is not None:
-            for can_id in self.subscribers:
-                self._start_listener(can_id)
+        #: Bus to use when connect() is called without one.
+        self.bus = bus
 
     def subscribe(self, can_id: int, callback) -> None:
         """Listen for messages with a specific CAN ID.
@@ -86,14 +87,24 @@ class Network(MutableMapping):
             if task is not None:
                 task.cancel()
 
-    def connect(self, bus) -> "Network":
+    def connect(self, bus: object = None) -> "Network":
         """Connect to CAN bus.
+
+        Must be called from within a running asyncio event loop, since it
+        creates the listener tasks that dispatch incoming frames.
 
         :param bus:
             An :class:`aiocan.Bus` instance wrapping a configured
-            ``machine.CAN`` object.
+            ``machine.CAN`` object. May be omitted if one was passed to the
+            constructor instead.
+
+        :raises RuntimeError:
+            If no bus was given here or at construction time.
         """
-        self.bus = bus
+        if bus is not None:
+            self.bus = bus
+        if self.bus is None:
+            raise RuntimeError("No bus given: pass one to connect() or the constructor")
         logger.info("Connected to CAN bus")
         for can_id in self.subscribers:
             self._start_listener(can_id)
