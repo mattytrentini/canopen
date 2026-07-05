@@ -120,7 +120,11 @@ class Network(MutableMapping):
         async with self.bus.subscribe(can_id) as q:
             while True:
                 msg = await q.get()
-                self.notify(can_id, msg.data, time.time())
+                try:
+                    self.notify(can_id, msg.data, time.time())
+                except Exception as e:
+                    # Exceptions in any callbacks should not affect CAN processing.
+                    logger.error(str(e))
 
     async def disconnect(self) -> None:
         """Disconnect from the CAN bus."""

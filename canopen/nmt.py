@@ -202,7 +202,7 @@ class NmtMaster(NmtBase):
         """
         if self._node_guarding_producer:
             self.stop_node_guarding()
-        self._node_guarding_producer = self.network.send_periodic(0x700 + self.id, None, period, True)
+        self._node_guarding_producer = self.network.send_periodic(0x700 + self.id, b"", period, True)
 
     def stop_node_guarding(self):
         """Stops the node guarding mechanism."""
