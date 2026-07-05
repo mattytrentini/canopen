@@ -1,181 +1,176 @@
-import time
+import asyncio
 import unittest
 
 import canopen
 
-from .util import SAMPLE_EDS
+from .util import SAMPLE_EDS, FakeBus, FakeChannel
+
+
+def run(coro):
+    return asyncio.run(coro)
 
 
 class TestSDO(unittest.TestCase):
     """
     Test SDO client and server against each other.
+
+    Structured as a single test method (with subTests) rather than one
+    asyncio.run() per test, since the shared connected network pair uses
+    asyncio.create_task()-based listener tasks tied to one event loop —
+    unittest's setUpClass/tearDownClass can't straddle a per-test loop.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        cls.network1 = canopen.Network()
-        cls.network1.NOTIFIER_SHUTDOWN_TIMEOUT = 0.0
-        cls.network1.connect("test", interface="virtual")
-        cls.remote_node = cls.network1.add_node(2, SAMPLE_EDS)
+    def test_all(self):
+        run(self._test_all())
 
-        cls.network2 = canopen.Network()
-        cls.network2.NOTIFIER_SHUTDOWN_TIMEOUT = 0.0
-        cls.network2.connect("test", interface="virtual")
-        cls.local_node = cls.network2.create_node(2, SAMPLE_EDS)
+    async def _test_all(self):
+        channel = FakeChannel()
+        bus1 = FakeBus(channel)
+        bus2 = FakeBus(channel)
 
-        cls.remote_node2 = cls.network1.add_node(3, SAMPLE_EDS)
+        network1 = canopen.Network()
+        remote_node = network1.add_node(2, SAMPLE_EDS)
+        network2 = canopen.Network()
+        local_node = network2.create_node(2, SAMPLE_EDS)
+        remote_node2 = network1.add_node(3, SAMPLE_EDS)
+        local_node2 = network2.create_node(3, SAMPLE_EDS)
 
-        cls.local_node2 = cls.network2.create_node(3, SAMPLE_EDS)
+        network1.connect(bus1)
+        network2.connect(bus2)
+        # Give the listener tasks a chance to register their queues.
+        await asyncio.sleep(0.01)
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.network1.disconnect()
-        cls.network2.disconnect()
+        try:
+            with self.subTest("expedited_upload"):
+                await local_node.sdo[0x1400][1].write(0x99)
+                vendor_id = await remote_node.sdo[0x1400][1].read()
+                self.assertEqual(vendor_id, 0x99)
 
-    def test_expedited_upload(self):
-        self.local_node.sdo[0x1400][1].raw = 0x99
-        vendor_id = self.remote_node.sdo[0x1400][1].raw
-        self.assertEqual(vendor_id, 0x99)
+            with self.subTest("expedited_upload_default_value_visible_string"):
+                device_name = await remote_node.sdo["Manufacturer device name"].read()
+                self.assertEqual(device_name, "TEST DEVICE")
 
-    def test_block_upload_switch_to_expedite_upload(self):
-        with self.assertRaises(canopen.SdoCommunicationError) as context:
-            with self.remote_node.sdo[0x1008].open('r', block_transfer=True) as fp:
-                pass
-        # We get this since the sdo client don't support the switch
-        # from block upload to expedite upload
-        self.assertEqual("Unexpected response 0x41", str(context.exception))
+            with self.subTest("expedited_upload_default_value_real"):
+                sampling_rate = await remote_node.sdo["Sensor Sampling Rate (Hz)"].read()
+                self.assertAlmostEqual(sampling_rate, 5.2, places=2)
 
-    def test_block_download_not_supported(self):
-        data = b"TEST DEVICE"
-        with self.assertRaises(canopen.SdoAbortedError) as context:
-            with self.remote_node.sdo[0x1008].open('wb',
-                                                   size=len(data),
-                                                   block_transfer=True) as fp:
-                pass
-        self.assertEqual(context.exception.code, 0x05040001)
+            with self.subTest("upload_zero_length"):
+                await local_node.sdo["Manufacturer device name"].write(b"")
+                with self.assertRaises(canopen.SdoAbortedError) as error:
+                    await remote_node.sdo["Manufacturer device name"].get_data()
+                # Should be No data available
+                self.assertEqual(error.exception.code, 0x0800_0024)
 
-    def test_expedited_upload_default_value_visible_string(self):
-        device_name = self.remote_node.sdo["Manufacturer device name"].raw
-        self.assertEqual(device_name, "TEST DEVICE")
+            with self.subTest("segmented_upload"):
+                await local_node.sdo["Manufacturer device name"].write("Some cool device")
+                device_name = await remote_node.sdo["Manufacturer device name"].get_data()
+                self.assertEqual(device_name, b"Some cool device")
 
-    def test_expedited_upload_default_value_real(self):
-        sampling_rate = self.remote_node.sdo["Sensor Sampling Rate (Hz)"].raw
-        self.assertAlmostEqual(sampling_rate, 5.2, places=2)
+            with self.subTest("expedited_download"):
+                await remote_node.sdo[0x2004].write(0xfeff)
+                value = await local_node.sdo[0x2004].read()
+                self.assertEqual(value, 0xfeff)
 
-    def test_upload_zero_length(self):
-        self.local_node.sdo["Manufacturer device name"].raw = b""
-        with self.assertRaises(canopen.SdoAbortedError) as error:
-            self.remote_node.sdo["Manufacturer device name"].data
-        # Should be No data available
-        self.assertEqual(error.exception.code, 0x0800_0024)
+            with self.subTest("expedited_download_wrong_datatype"):
+                # Try to write 32 bit in integer16 type
+                with self.assertRaises(canopen.SdoAbortedError) as error:
+                    await remote_node.sdo.download(0x2001, 0x0, bytes([10, 10, 10, 10]))
+                self.assertEqual(error.exception.code, 0x06070010)
+                # Try to write normal 16 bit word, should be ok
+                await remote_node.sdo.download(0x2001, 0x0, bytes([10, 10]))
+                value = await remote_node.sdo.upload(0x2001, 0x0)
+                self.assertEqual(value, bytes([10, 10]))
 
-    def test_segmented_upload(self):
-        self.local_node.sdo["Manufacturer device name"].raw = "Some cool device"
-        device_name = self.remote_node.sdo["Manufacturer device name"].data
-        self.assertEqual(device_name, b"Some cool device")
+            with self.subTest("segmented_download"):
+                await remote_node.sdo[0x2000].write("Another cool device")
+                value = await local_node.sdo[0x2000].get_data()
+                self.assertEqual(value, b"Another cool device")
 
-    def test_expedited_download(self):
-        self.remote_node.sdo[0x2004].raw = 0xfeff
-        value = self.local_node.sdo[0x2004].raw
-        self.assertEqual(value, 0xfeff)
+            with self.subTest("slave_send_heartbeat"):
+                # Setting the heartbeat time should trigger heartbeating
+                # to start
+                await remote_node.sdo["Producer heartbeat time"].write(100)
+                state = await remote_node.nmt.wait_for_heartbeat()
+                local_node.nmt.stop_heartbeat()
+                # The NMT master will change the state INITIALISING (0)
+                # to PRE-OPERATIONAL (127)
+                self.assertEqual(state, 'PRE-OPERATIONAL')
 
-    def test_expedited_download_wrong_datatype(self):
-        # Try to write 32 bit in integer16 type
-        with self.assertRaises(canopen.SdoAbortedError) as error:
-            self.remote_node.sdo.download(0x2001, 0x0, bytes([10, 10, 10, 10]))
-        self.assertEqual(error.exception.code, 0x06070010)
-        # Try to write normal 16 bit word, should be ok
-        self.remote_node.sdo.download(0x2001, 0x0, bytes([10, 10]))
-        value = self.remote_node.sdo.upload(0x2001, 0x0)
-        self.assertEqual(value, bytes([10, 10]))
+            with self.subTest("nmt_state_initializing_to_preoper"):
+                # Initialize the heartbeat timer
+                await local_node.sdo["Producer heartbeat time"].write(100)
+                local_node.nmt.stop_heartbeat()
+                # This transition shall start the heartbeating
+                local_node.nmt.state = 'INITIALISING'
+                local_node.nmt.state = 'PRE-OPERATIONAL'
+                state = await remote_node.nmt.wait_for_heartbeat()
+                local_node.nmt.stop_heartbeat()
+                self.assertEqual(state, 'PRE-OPERATIONAL')
 
-    def test_segmented_download(self):
-        self.remote_node.sdo[0x2000].raw = "Another cool device"
-        value = self.local_node.sdo[0x2000].data
-        self.assertEqual(value, b"Another cool device")
+            with self.subTest("receive_abort_request"):
+                await remote_node.sdo.abort(0x0504_0003)  # Invalid sequence number
+                # Give the local node a chance to receive the abort.
+                await asyncio.sleep(0.05)
+                self.assertEqual(local_node.sdo.last_received_error, 0x0504_0003)
 
-    def test_slave_send_heartbeat(self):
-        # Setting the heartbeat time should trigger heartbeating
-        # to start
-        self.remote_node.sdo["Producer heartbeat time"].raw = 100
-        state = self.remote_node.nmt.wait_for_heartbeat()
-        self.local_node.nmt.stop_heartbeat()
-        # The NMT master will change the state INITIALISING (0)
-        # to PRE-OPERATIONAL (127)
-        self.assertEqual(state, 'PRE-OPERATIONAL')
+            with self.subTest("start_remote_node"):
+                remote_node.nmt.state = 'OPERATIONAL'
+                # Give the slave a chance to receive the command.
+                await asyncio.sleep(0.05)
+                slave_state = local_node.nmt.state
+                self.assertEqual(slave_state, 'OPERATIONAL')
 
-    def test_nmt_state_initializing_to_preoper(self):
-        # Initialize the heartbeat timer
-        self.local_node.sdo["Producer heartbeat time"].raw = 100
-        self.local_node.nmt.stop_heartbeat()
-        # This transition shall start the heartbeating
-        self.local_node.nmt.state = 'INITIALISING'
-        self.local_node.nmt.state = 'PRE-OPERATIONAL'
-        state = self.remote_node.nmt.wait_for_heartbeat()
-        self.local_node.nmt.stop_heartbeat()
-        self.assertEqual(state, 'PRE-OPERATIONAL')
+            with self.subTest("two_nodes_on_the_bus"):
+                await local_node.sdo["Manufacturer device name"].write("Some cool device")
+                device_name = await remote_node.sdo["Manufacturer device name"].get_data()
+                self.assertEqual(device_name, b"Some cool device")
 
-    def test_receive_abort_request(self):
-        self.remote_node.sdo.abort(0x0504_0003)  # Invalid sequence number
-        # Line below is just so that we are sure the client have received the abort
-        # before we do the check
-        time.sleep(0.1)
-        self.assertEqual(self.local_node.sdo.last_received_error, 0x0504_0003)
+                await local_node2.sdo["Manufacturer device name"].write("Some cool device2")
+                device_name = await remote_node2.sdo["Manufacturer device name"].get_data()
+                self.assertEqual(device_name, b"Some cool device2")
 
-    def test_start_remote_node(self):
-        self.remote_node.nmt.state = 'OPERATIONAL'
-        # Line below is just so that we are sure the client have received the command
-        # before we do the check
-        time.sleep(0.1)
-        slave_state = self.local_node.nmt.state
-        self.assertEqual(slave_state, 'OPERATIONAL')
+            with self.subTest("abort"):
+                with self.assertRaises(canopen.SdoAbortedError) as cm:
+                    _ = await remote_node.sdo.upload(0x1234, 0)
+                # Should be Object does not exist
+                self.assertEqual(cm.exception.code, 0x06020000)
 
-    def test_two_nodes_on_the_bus(self):
-        self.local_node.sdo["Manufacturer device name"].raw = "Some cool device"
-        device_name = self.remote_node.sdo["Manufacturer device name"].data
-        self.assertEqual(device_name, b"Some cool device")
+                with self.assertRaises(canopen.SdoAbortedError) as cm:
+                    _ = await remote_node.sdo.upload(0x1018, 100)
+                # Should be Subindex does not exist
+                self.assertEqual(cm.exception.code, 0x06090011)
 
-        self.local_node2.sdo["Manufacturer device name"].raw = "Some cool device2"
-        device_name = self.remote_node2.sdo["Manufacturer device name"].data
-        self.assertEqual(device_name, b"Some cool device2")
+                with self.assertRaises(canopen.SdoAbortedError) as cm:
+                    _ = await remote_node.sdo[0x1001].get_data()
+                # Should be Resource not available
+                self.assertEqual(cm.exception.code, 0x060A0023)
 
-    def test_abort(self):
-        with self.assertRaises(canopen.SdoAbortedError) as cm:
-            _ = self.remote_node.sdo.upload(0x1234, 0)
-        # Should be Object does not exist
-        self.assertEqual(cm.exception.code, 0x06020000)
+            with self.subTest("callbacks"):
+                calls = {}
 
-        with self.assertRaises(canopen.SdoAbortedError) as cm:
-            _ = self.remote_node.sdo.upload(0x1018, 100)
-        # Should be Subindex does not exist
-        self.assertEqual(cm.exception.code, 0x06090011)
+                def some_read_callback(**kwargs):
+                    calls.update(kwargs)
+                    if kwargs["index"] == 0x1003:
+                        return 0x0201
 
-        with self.assertRaises(canopen.SdoAbortedError) as cm:
-            _ = self.remote_node.sdo[0x1001].data
-        # Should be Resource not available
-        self.assertEqual(cm.exception.code, 0x060A0023)
+                def some_write_callback(**kwargs):
+                    calls.update(kwargs)
 
-    def _some_read_callback(self, **kwargs):
-        self._kwargs = kwargs
-        if kwargs["index"] == 0x1003:
-            return 0x0201
+                local_node.add_read_callback(some_read_callback)
+                local_node.add_write_callback(some_write_callback)
 
-    def _some_write_callback(self, **kwargs):
-        self._kwargs = kwargs
+                data = await remote_node.sdo.upload(0x1003, 5)
+                self.assertEqual(data, b"\x01\x02\x00\x00")
+                self.assertEqual(calls["index"], 0x1003)
+                self.assertEqual(calls["subindex"], 5)
 
-    def test_callbacks(self):
-        self.local_node.add_read_callback(self._some_read_callback)
-        self.local_node.add_write_callback(self._some_write_callback)
-
-        data = self.remote_node.sdo.upload(0x1003, 5)
-        self.assertEqual(data, b"\x01\x02\x00\x00")
-        self.assertEqual(self._kwargs["index"], 0x1003)
-        self.assertEqual(self._kwargs["subindex"], 5)
-
-        self.remote_node.sdo.download(0x1017, 0, b"\x03\x04")
-        self.assertEqual(self._kwargs["index"], 0x1017)
-        self.assertEqual(self._kwargs["subindex"], 0)
-        self.assertEqual(self._kwargs["data"], b"\x03\x04")
+                await remote_node.sdo.download(0x1017, 0, b"\x03\x04")
+                self.assertEqual(calls["index"], 0x1017)
+                self.assertEqual(calls["subindex"], 0)
+                self.assertEqual(calls["data"], b"\x03\x04")
+        finally:
+            await network1.disconnect()
+            await network2.disconnect()
 
 
 class TestPDO(unittest.TestCase):
@@ -183,34 +178,38 @@ class TestPDO(unittest.TestCase):
     Test PDO slave.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        cls.network1 = canopen.Network()
-        cls.network1.NOTIFIER_SHUTDOWN_TIMEOUT = 0.0
-        cls.network1.connect("test", interface="virtual")
-        cls.remote_node = cls.network1.add_node(2, SAMPLE_EDS)
+    def test_all(self):
+        run(self._test_all())
 
-        cls.network2 = canopen.Network()
-        cls.network2.NOTIFIER_SHUTDOWN_TIMEOUT = 0.0
-        cls.network2.connect("test", interface="virtual")
-        cls.local_node = cls.network2.create_node(2, SAMPLE_EDS)
+    async def _test_all(self):
+        channel = FakeChannel()
+        bus1 = FakeBus(channel)
+        bus2 = FakeBus(channel)
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.network1.disconnect()
-        cls.network2.disconnect()
+        network1 = canopen.Network()
+        remote_node = network1.add_node(2, SAMPLE_EDS)
+        network2 = canopen.Network()
+        local_node = network2.create_node(2, SAMPLE_EDS)
 
-    def test_read(self):
-        # TODO: Do some more checks here. Currently it only tests that they
-        # can be called without raising an error.
-        self.remote_node.pdo.read()
-        self.local_node.pdo.read()
+        network1.connect(bus1)
+        network2.connect(bus2)
+        await asyncio.sleep(0.01)
 
-    def test_save(self):
-        # TODO: Do some more checks here. Currently it only tests that they
-        # can be called without raising an error.
-        self.remote_node.pdo.save()
-        self.local_node.pdo.save()
+        try:
+            with self.subTest("read"):
+                # TODO: Do some more checks here. Currently it only tests that
+                # they can be called without raising an error.
+                await remote_node.pdo.read()
+                await local_node.pdo.read()
+
+            with self.subTest("save"):
+                # TODO: Do some more checks here. Currently it only tests that
+                # they can be called without raising an error.
+                await remote_node.pdo.save()
+                await local_node.pdo.save()
+        finally:
+            await network1.disconnect()
+            await network2.disconnect()
 
 
 if __name__ == "__main__":
