@@ -227,19 +227,19 @@ class BaseNode402(RemoteNode):
         self.tpdo_pointers: dict[int, PdoMap] = {}
         self.rpdo_pointers: dict[int, PdoMap] = {}
 
-    def setup_402_state_machine(self, read_pdos=True):
+    async def setup_402_state_machine(self, read_pdos=True):
         """Configure the state machine by searching for a TPDO that has the StatusWord mapped.
 
         :param bool read_pdos: Upload current PDO configuration from node.
         :raises ValueError:
             If the the node can't find a Statusword configured in any of the TPDOs.
         """
-        self.setup_pdos(read_pdos)
+        await self.setup_pdos(read_pdos)
         self._check_controlword_configured()
         self._check_statusword_configured()
         self._check_op_mode_configured()
 
-    def setup_pdos(self, upload=True):
+    async def setup_pdos(self, upload=True):
         """Find the relevant PDO configuration to handle the state machine.
 
         :param bool upload:
@@ -250,7 +250,7 @@ class BaseNode402(RemoteNode):
         """
         if upload:
             assert self.nmt.state in 'PRE-OPERATIONAL', 'OPERATIONAL'
-            self.pdo.read()  # TPDO and RPDO configurations
+            await self.pdo.read()  # TPDO and RPDO configurations
         else:
             self.pdo.subscribe()  # Get notified on reception, usually a side-effect of read()
         self._init_tpdo_values()

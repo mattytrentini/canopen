@@ -26,16 +26,17 @@ class RemoteNode(BaseNode):
     :param object_dictionary:
         Object dictionary as either a path to a file, an ``ObjectDictionary``
         or a file like object.
-    :param load_od:
-        Enable the Object Dictionary to be sent through SDO's to the remote
-        node at startup.
+
+    Sending the Object Dictionary to the node via SDO requires network I/O,
+    so it can no longer happen implicitly at construction time (there's no
+    way to await from ``__init__``). Call ``await node.load_configuration()``
+    explicitly after construction if needed.
     """
 
     def __init__(
         self,
         node_id: int,
         object_dictionary: ObjectDictionary | str | object,
-        load_od: bool = False,
     ):
         super(RemoteNode, self).__init__(node_id, object_dictionary)
 
@@ -49,9 +50,6 @@ class RemoteNode(BaseNode):
         self.pdo = PDO(self, self.rpdo, self.tpdo)
         self.nmt = NmtMaster(self.id)
         self.emcy = EmcyConsumer()
-
-        if load_od:
-            self.load_configuration()
 
     def associate_network(self, network: "canopen.network.Network"):
         if self.has_network():
@@ -102,7 +100,7 @@ class RemoteNode(BaseNode):
             self.network.subscribe(client.tx_cobid, client.on_response)
         return client
 
-    def store(self, subindex=1):
+    async def store(self, subindex=1):
         """Store parameters in non-volatile memory.
 
         :param int subindex:
@@ -111,9 +109,9 @@ class RemoteNode(BaseNode):
             3 = Application related parameters\n
             4 - 127 = Manufacturer specific
         """
-        self.sdo.download(0x1010, subindex, b"save")
+        await self.sdo.download(0x1010, subindex, b"save")
 
-    def restore(self, subindex=1):
+    async def restore(self, subindex=1):
         """Restore default parameters.
 
         :param int subindex:
@@ -122,9 +120,9 @@ class RemoteNode(BaseNode):
             3 = Application related parameters\n
             4 - 127 = Manufacturer specific
         """
-        self.sdo.download(0x1011, subindex, b"load")
+        await self.sdo.download(0x1011, subindex, b"load")
 
-    def __load_configuration_helper(self, index, subindex, name, value):
+    async def __load_configuration_helper(self, index, subindex, name, value):
         """Helper function to send SDOs to the remote node
         :param index: Object index
         :param subindex: Object sub-index (if it does not exist e should be None)
@@ -135,9 +133,9 @@ class RemoteNode(BaseNode):
             if subindex is not None:
                 logger.info('SDO [0x%04X][0x%02X]: %s: %#06x',
                             index, subindex, name, value)
-                self.sdo[index][subindex].raw = value
+                await self.sdo[index][subindex].write(value)
             else:
-                self.sdo[index].raw = value
+                await self.sdo[index].write(value)
                 logger.info('SDO [0x%04X]: %s: %#06x',
                             index, name, value)
         except SdoCommunicationError as e:
@@ -152,7 +150,7 @@ class RemoteNode(BaseNode):
                                index, subindex, e)
                 raise
 
-    def load_configuration(self) -> None:
+    async def load_configuration(self) -> None:
         """Load the configuration of the node from the Object Dictionary.
 
         Iterate through all objects in the Object Dictionary and download the
@@ -163,8 +161,8 @@ class RemoteNode(BaseNode):
 
         """
         # First apply PDO configuration from object dictionary
-        self.pdo.read(from_od=True)
-        self.pdo.save()
+        await self.pdo.read(from_od=True)
+        await self.pdo.save()
 
         # Now apply all other records in object dictionary
         for obj in self.object_dictionary.values():
@@ -174,6 +172,6 @@ class RemoteNode(BaseNode):
             if isinstance(obj, ODRecord) or isinstance(obj, ODArray):
                 for subobj in obj.values():
                     if isinstance(subobj, ODVariable) and subobj.writable and (subobj.value is not None):
-                        self.__load_configuration_helper(subobj.index, subobj.subindex, subobj.name, subobj.value)
+                        await self.__load_configuration_helper(subobj.index, subobj.subindex, subobj.name, subobj.value)
             elif isinstance(obj, ODVariable) and obj.writable and (obj.value is not None):
-                self.__load_configuration_helper(obj.index, None, obj.name, obj.value)
+                await self.__load_configuration_helper(obj.index, None, obj.name, obj.value)

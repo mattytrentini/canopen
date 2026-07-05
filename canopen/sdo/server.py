@@ -198,8 +198,12 @@ class SdoServer(SdoBase):
         self.send_response(data)
         # logger.error("Transfer aborted with code 0x%08X", abort_code)
 
-    def upload(self, index: int, subindex: int) -> bytes:
+    async def upload(self, index: int, subindex: int) -> bytes:
         """May be called to make a read operation without an Object Dictionary.
+
+        Declared async to match :class:`~canopen.sdo.base.SdoBase`'s
+        interface (used by :class:`~canopen.sdo.base.SdoVariable`), even
+        though this is a local, synchronous lookup with no network I/O.
 
         :param index:
             Index of object to read.
@@ -213,7 +217,7 @@ class SdoServer(SdoBase):
         """
         return self._node.get_data(index, subindex)
 
-    def download(
+    async def download(
         self,
         index: int,
         subindex: int,
@@ -221,6 +225,10 @@ class SdoServer(SdoBase):
         force_segment: bool = False,
     ):
         """May be called to make a write operation without an Object Dictionary.
+
+        Declared async to match :class:`~canopen.sdo.base.SdoBase`'s
+        interface (used by :class:`~canopen.sdo.base.SdoVariable`), even
+        though this is a local, synchronous lookup with no network I/O.
 
         :param index:
             Index of object to write.

@@ -70,15 +70,15 @@ class PdoBase(Mapping):
     def __len__(self):
         return len(self.map)
 
-    def read(self, from_od=False):
+    async def read(self, from_od=False):
         """Read PDO configuration from node using SDO."""
         for pdo_map in self.map.values():
-            pdo_map.read(from_od=from_od)
+            await pdo_map.read(from_od=from_od)
 
-    def save(self):
+    async def save(self):
         """Save PDO configuration to node using SDO."""
         for pdo_map in self.map.values():
-            pdo_map.save()
+            await pdo_map.save()
 
     def subscribe(self):
         """Register the node's PDOs for reception on the network.
@@ -359,58 +359,58 @@ class PdoMap:
         """
         self.callbacks.append(callback)
 
-    def read(self, from_od=False) -> None:
+    async def read(self, from_od: bool = False) -> None:
         """Read PDO configuration for this map.
-        
+
         :param from_od:
             Read using SDO if False, read from object dictionary if True.
             When reading from object dictionary, if DCF populated a value, the
             DCF value will be used, otherwise the EDS default will be used instead.
         """
 
-        def _raw_from(param):
+        async def _raw_from(param):
             if from_od:
                 if param.od.value is not None:
                     return param.od.value
                 else:
                     return param.od.default
-            return param.raw
+            return await param.read()
 
-        cob_id = _raw_from(self.com_record[1])
+        cob_id = await _raw_from(self.com_record[1])
         self.cob_id = cob_id & 0x1FFFFFFF
         logger.info("COB-ID is 0x%X", self.cob_id)
         self.enabled = cob_id & PDO_NOT_VALID == 0
         logger.info("PDO is %s", "enabled" if self.enabled else "disabled")
         self.rtr_allowed = cob_id & RTR_NOT_ALLOWED == 0
         logger.info("RTR is %s", "allowed" if self.rtr_allowed else "not allowed")
-        self.trans_type = _raw_from(self.com_record[2])
+        self.trans_type = await _raw_from(self.com_record[2])
         logger.info("Transmission type is %d", self.trans_type)
         if self.trans_type >= 254:
             try:
-                self.inhibit_time = _raw_from(self.com_record[3])
+                self.inhibit_time = await _raw_from(self.com_record[3])
             except (KeyError, SdoAbortedError) as e:
                 logger.info("Could not read inhibit time (%s)", e)
             else:
                 logger.info("Inhibit time is set to %d ms", self.inhibit_time)
 
             try:
-                self.event_timer = _raw_from(self.com_record[5])
+                self.event_timer = await _raw_from(self.com_record[5])
             except (KeyError, SdoAbortedError) as e:
                 logger.info("Could not read event timer (%s)", e)
             else:
                 logger.info("Event timer is set to %d ms", self.event_timer)
 
             try:
-                self.sync_start_value = _raw_from(self.com_record[6])
+                self.sync_start_value = await _raw_from(self.com_record[6])
             except (KeyError, SdoAbortedError) as e:
                 logger.info("Could not read SYNC start value (%s)", e)
             else:
                 logger.info("SYNC start value is set to %d ms", self.sync_start_value)
 
         self.clear()
-        nof_entries = _raw_from(self.map_array[0])
+        nof_entries = await _raw_from(self.map_array[0])
         for subindex in range(1, nof_entries + 1):
-            value = _raw_from(self.map_array[subindex])
+            value = await _raw_from(self.map_array[subindex])
             index = value >> 16
             subindex = (value >> 8) & 0xFF
             # Ignore the highest bit, it is never valid for <= 64 PDO length
@@ -425,43 +425,47 @@ class PdoMap:
 
         self.subscribe()
 
-    def save(self) -> None:
+    async def save(self) -> None:
         """Save PDO configuration for this map using SDO."""
         if self.cob_id is None:
             logger.info("Skip saving %s: COB-ID was never set", self.com_record.od.name)
             return
         logger.info("Setting COB-ID 0x%X and temporarily disabling PDO", self.cob_id)
-        self.com_record[1].raw = (
+        await self.com_record[1].write(
             self.cob_id
             | PDO_NOT_VALID
             | (RTR_NOT_ALLOWED if not self.rtr_allowed else 0)
         )
 
-        def _set_com_record(
+        async def _set_com_record(
             subindex: int, value: int | None, log_fmt: str, log_factor: int = 1
         ):
             if value is None:
                 return
             if self.com_record[subindex].writable:
                 logger.info(f"Setting {log_fmt}", value * log_factor)
-                self.com_record[subindex].raw = value
+                await self.com_record[subindex].write(value)
             else:
                 logger.info(f"Cannot set {log_fmt}, not writable", value * log_factor)
 
-        _set_com_record(2, self.trans_type, "transmission type to %d")
-        _set_com_record(3, self.inhibit_time, "inhibit time to %d us", 100)
-        _set_com_record(5, self.event_timer, "event timer to %d ms")
-        _set_com_record(6, self.sync_start_value, "SYNC start value to %d")
+        await _set_com_record(2, self.trans_type, "transmission type to %d")
+        await _set_com_record(3, self.inhibit_time, "inhibit time to %d us", 100)
+        await _set_com_record(5, self.event_timer, "event timer to %d ms")
+        await _set_com_record(6, self.sync_start_value, "SYNC start value to %d")
 
         try:
-            self.map_array[0].raw = 0
+            await self.map_array[0].write(0)
         except SdoAbortedError:
             # WORKAROUND for broken implementations: If the array has a
             # fixed number of entries (count not writable), generate dummy
             # mappings for an invalid object 0x0000:00 to overwrite any
             # excess entries with all-zeros.
-            self._fill_map(self.map_array[0].raw)
-        for var, entry in zip(self.map, self.map_array.values()):
+            self._fill_map(await self.map_array[0].read())
+        # map_array is usually an SdoArray, whose length can only be known by
+        # reading subindex 0 (network I/O) — collect it explicitly rather
+        # than relying on the synchronous Mapping.values() it no longer has.
+        entries = [self.map_array[i] async for i in self.map_array]
+        for var, entry in zip(self.map, entries):
             if not entry.od.writable:
                 continue
             logger.info(
@@ -473,11 +477,11 @@ class PdoMap:
             )
             if getattr(self.pdo_node.node, "curtis_hack", False):
                 # Curtis HACK: mixed up field order
-                entry.raw = var.index | var.subindex << 16 | var.length << 24
+                await entry.write(var.index | var.subindex << 16 | var.length << 24)
             else:
-                entry.raw = var.index << 16 | var.subindex << 8 | var.length
+                await entry.write(var.index << 16 | var.subindex << 8 | var.length)
         try:
-            self.map_array[0].raw = len(self.map)
+            await self.map_array[0].write(len(self.map))
         except SdoAbortedError as e:
             # WORKAROUND for broken implementations: If the array
             # number-of-entries parameter is not writable, we have already
@@ -491,7 +495,7 @@ class PdoMap:
         if self.enabled:
             cob_id = self.cob_id | (RTR_NOT_ALLOWED if not self.rtr_allowed else 0x0)
             logger.info("Setting COB-ID 0x%X and re-enabling PDO", cob_id)
-            self.com_record[1].raw = cob_id
+            await self.com_record[1].write(cob_id)
             self.subscribe()
 
     def subscribe(self) -> None:

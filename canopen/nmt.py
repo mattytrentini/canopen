@@ -242,7 +242,11 @@ class NmtSlave(NmtBase):
         # The heartbeat service should start on the transition
         # between INITIALIZING and PRE-OPERATIONAL state
         if old_state == 0 and self._state == 127:
-            heartbeat_time_ms = self._local_node.sdo[0x1017].raw
+            # Bypass SdoVariable.read() (async, network-shaped) since this is
+            # a local, synchronous lookup, and send_command() must stay sync
+            # (it's reachable from the NmtBase.state property setter).
+            od_var = self._local_node.object_dictionary[0x1017]
+            heartbeat_time_ms = od_var.decode_raw(self._local_node.get_data(0x1017, 0))
             self.start_heartbeat(heartbeat_time_ms)
         else:
             self.update_heartbeat()
